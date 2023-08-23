@@ -152,7 +152,7 @@ namespace ui {
     Theme* theme() const { return m_theme; }
     Style* style() const { return m_style; }
     void setTheme(Theme* theme);
-    void setStyle(Style* style);
+    virtual void setStyle(Style* style);
     void initTheme();
 
     // ===============================================================
@@ -349,12 +349,29 @@ namespace ui {
     void captureMouse();
     void releaseMouse();
 
+    // True when the widget has the keyboard focus (only widgets with
+    // FOCUS_STOP flag will receive the HAS_FOCUS flag/receive the
+    // focus when the user press the tab key to navigate widgets).
     bool hasFocus() const { return hasFlags(HAS_FOCUS); }
-    bool hasMouse() const { return hasFlags(HAS_MOUSE); }
-    bool hasCapture() const { return hasFlags(HAS_CAPTURE); }
 
-    // Checking if the mouse is currently above the widget.
-    bool hasMouseOver() const;
+    // True when the widget has the mouse above. If the mouse leaves
+    // the widget, the widget will lose the HAS_MOUSE flag. If some
+    // widget captures the mouse, no other widget will have this flag,
+    // so in this case there are just two options:
+    //
+    // 1) The widget with the capture (hasCapture()) will has the
+    //    mouse flag too.
+    // 2) Or no other widget will have the mouse flag until the widget
+    //    releases the capture (releaseCapture())
+    bool hasMouse() const { return hasFlags(HAS_MOUSE); }
+
+    // True when the widget has captured the mouse, e.g. generally
+    // when the user press a mouse button above a clickeable widget
+    // (e.g. ui::Button), the widget will capture the mouse
+    // temporarily until the mouse button is released. If a widget
+    // captures the mouse, it will receive all mouse events until it
+    // release (even if the mouse moves outside the widget).
+    bool hasCapture() const { return hasFlags(HAS_CAPTURE); }
 
     // Returns the mouse position relative to the top-left corner of
     // the ui::Display's client area/content rect.
@@ -372,14 +389,23 @@ namespace ui {
 
     // Returns lower-case letter that represet the mnemonic of the widget
     // (the underscored character, i.e. the letter after & symbol).
-    int mnemonic() const { return m_mnemonic; }
-    void setMnemonic(int mnemonic);
+    int mnemonic() const {
+      return (m_mnemonic & kMnemonicCharMask);
+    }
+    bool mnemonicRequiresModifiers() const {
+      return (m_mnemonic & kMnemonicModifiersMask ? true: false);
+    }
+    void setMnemonic(const int mnemonic,
+                     const bool requireModifiers);
 
     // Assigns mnemonic from the character preceded by the given
     // escapeChar ('&' by default).
-    void processMnemonicFromText(int escapeChar = '&');
+    void processMnemonicFromText(const int escapeChar = '&',
+                                 const bool requireModifiers = true);
 
-    // Returns true if the mnemonic character is pressed.
+    // Returns true if the mnemonic character is pressed (without modifiers).
+    // TODO maybe we can add check for modifiers now that this
+    //      information is included in the Widget
     bool isMnemonicPressed(const ui::KeyMessage* keyMsg) const;
 
     // Signals
@@ -437,7 +463,14 @@ namespace ui {
     Widget* m_parent;             // Who is the parent?
     int m_parentIndex;            // Location/index of this widget in the parent's Widget::m_children vector
     gfx::Size* m_sizeHint;
-    int m_mnemonic;               // Keyboard shortcut to access this widget like Alt+mnemonic
+
+    // Keyboard shortcut to access this widget like Alt+mnemonic.  If
+    // kMnemonicModifiersMask bit is zero, it means that the mnemonic
+    // can be used without Alt or Command key modifiers (useful for
+    // buttons in ui::Alert).
+    static constexpr int kMnemonicCharMask = 0x7f;
+    static constexpr int kMnemonicModifiersMask = 0x80;
+    int m_mnemonic;
 
     // Widget size limits
     gfx::Size m_minSize, m_maxSize;

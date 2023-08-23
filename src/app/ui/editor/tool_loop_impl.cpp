@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2022  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -783,6 +783,13 @@ tools::ToolLoop* create_tool_loop(
   Site site = editor->getSite();
   doc::Grid grid = site.grid();
 
+  // If the document is read-only.
+  if (site.document()->isReadOnly()) {
+    StatusBar::instance()->showTip(
+      3000, Strings::statusbar_tips_cannot_modify_readonly_sprite());
+    return nullptr;
+  }
+
   ToolLoopParams params;
   params.tool = editor->getCurrentEditorTool();
   params.ink = editor->getCurrentEditorInk();
@@ -822,11 +829,15 @@ tools::ToolLoop* create_tool_loop(
       return nullptr;
     }
     else if (!layer->isVisibleHierarchy()) {
-      StatusBar::instance()->showTip(
-        1000,
-        fmt::format(Strings::statusbar_tips_layer_x_is_hidden(),
-                    layer->name()));
-      return nullptr;
+      auto& toolPref = Preferences::instance().tool(params.tool);
+      if (toolPref.floodfill.referTo() ==
+          app::gen::FillReferTo::ACTIVE_LAYER) {
+        StatusBar::instance()->showTip(
+          1000,
+          fmt::format(Strings::statusbar_tips_layer_x_is_hidden(),
+                      layer->name()));
+        return nullptr;
+      }
     }
     // If the active layer is read-only.
     else if (layer_is_locked(editor)) {

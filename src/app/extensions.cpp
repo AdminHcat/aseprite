@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020-2022  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2017-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -26,10 +26,16 @@
 #include "base/fs.h"
 #include "base/fstream_path.h"
 #include "render/dithering_matrix.h"
+#include "ui/widget.h"
+
+#if ENABLE_SENTRY
+#include "app/sentry_wrapper.h"
+#endif
 
 #ifdef ENABLE_SCRIPTING
   #include "app/script/engine.h"
   #include "app/script/luacpp.h"
+  #include "app/script/require.h"
 #endif
 
 #include "archive.h"
@@ -213,8 +219,8 @@ Extension::DitheringMatrixInfo::DitheringMatrixInfo(const std::string& path,
 const render::DitheringMatrix& Extension::DitheringMatrixInfo::matrix() const
 {
   if (!m_loaded) {
-    m_loaded = true;
     load_dithering_matrix_from_sprite(m_path, m_matrix);
+    m_loaded = true;
   }
   return m_matrix;
 }
@@ -265,13 +271,17 @@ void Extension::addKeys(const std::string& id, const std::string& path)
   updateCategory(Category::Keys);
 }
 
-void Extension::addLanguage(const std::string& id, const std::string& path)
+void Extension::addLanguage(const std::string& id,
+                            const std::string& path,
+                            const std::string& displayName)
 {
-  m_languages[id] = path;
+  m_languages[id] = LangInfo(id, path, displayName);
   updateCategory(Category::Languages);
 }
 
-void Extension::addTheme(const std::string& id, const std::string& path, const std::string& variant)
+void Extension::addTheme(const std::string& id,
+                         const std::string& path,
+                         const std::string& variant)
 {
   m_themes[id] = ThemeInfo(path, variant);
   updateCategory(Category::Themes);
@@ -313,6 +323,35 @@ void Extension::removeCommand(const std::string& id)
       ++it;
     }
   }
+}
+
+void Extension::addMenuGroup(const std::string& id)
+{
+  PluginItem item;
+  item.type = PluginItem::MenuGroup;
+  item.id = id;
+  m_plugin.items.push_back(item);
+}
+
+void Extension::removeMenuGroup(const std::string& id)
+{
+  for (auto it=m_plugin.items.begin(); it != m_plugin.items.end(); ) {
+    if (it->type == PluginItem::MenuGroup &&
+        it->id == id) {
+      it = m_plugin.items.erase(it);
+    }
+    else {
+      ++it;
+    }
+  }
+}
+
+void Extension::addMenuSeparator(ui::Widget* widget)
+{
+  PluginItem item;
+  item.type = PluginItem::MenuSeparator;
+  item.widget = widget;
+  m_plugin.items.push_back(item);
 }
 
 #endif
@@ -593,6 +632,10 @@ void Extension::initScripts()
   script::push_plugin(L, this);
   m_plugin.pluginRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
+  // Set the _PLUGIN global so require() can find .lua files from the
+  // plugin path.
+  script::SetPluginForRequire setPlugin(L, m_plugin.pluginRef);
+
   // Read plugin.preferences value
   {
     std::string fn = base::join_path(m_path, kPrefLua);
@@ -631,7 +674,7 @@ void Extension::initScripts()
       lua_pop(L, 1);
     }
 
-    // Call the init() function of thi sscript with a Plugin object as first parameter
+    // Call the init() function of this script with a Plugin object as first parameter
     if (lua_getglobal(L, "init") == LUA_TFUNCTION) {
       // Call init(plugin)
       lua_rawgeti(L, LUA_REGISTRYINDEX, m_plugin.pluginRef);
@@ -685,14 +728,16 @@ void Extension::exitScripts()
     m_plugin.pluginRef = LUA_REFNIL;
   }
 
-  // Remove plugin items automatically
-  for (const auto& item : m_plugin.items) {
+  // Remove plugin items automatically from back to front (in the
+  // reverse order that they were added).
+  for (auto it=m_plugin.items.rbegin(), end=m_plugin.items.rend(); it!=end; ++it) {
+    auto& item = *it;
+
     switch (item.type) {
       case PluginItem::Command: {
         auto cmds = Commands::instance();
         auto cmd = cmds->byId(item.id.c_str());
         ASSERT(cmd);
-
         if (cmd) {
 #ifdef ENABLE_UI
           // TODO use a signal
@@ -707,8 +752,31 @@ void Extension::exitScripts()
         }
         break;
       }
+
+#ifdef ENABLE_UI
+
+      case PluginItem::MenuSeparator:
+        ASSERT(item.widget);
+        ASSERT(item.widget->parent());
+        if (item.widget &&
+            item.widget->parent()) {
+          // TODO use a signal
+          AppMenus::instance()->removeMenuItemFromGroup(item.widget);
+          ASSERT(!item.widget->parent());
+          item.widget = nullptr;
+        }
+        break;
+
+      case PluginItem::MenuGroup:
+        // TODO use a signal
+        AppMenus::instance()->removeMenuGroup(item.id);
+        break;
+
+#endif // ENABLE_UI
+
     }
   }
+
   m_plugin.items.clear();
 }
 
@@ -807,7 +875,7 @@ std::string Extensions::languagePath(const std::string& langId)
 
     auto it = ext->languages().find(langId);
     if (it != ext->languages().end())
-      return it->second;
+      return it->second.path;
   }
   return std::string();
 }
@@ -1037,14 +1105,25 @@ Extension* Extensions::loadExtension(const std::string& path,
 
   LOG("EXT: Extension '%s' loaded\n", name.c_str());
 
-  std::unique_ptr<Extension> extension(
-    new Extension(path,
-                  name,
-                  version,
-                  displayName,
-                  // Extensions are enabled by default
-                  get_config_bool("extensions", name.c_str(), true),
-                  isBuiltinExtension));
+#if ENABLE_SENTRY
+  if (!isBuiltinExtension) {
+    std::map<std::string, std::string> data = { { "name", name },
+                                                { "version", version } };
+    if (json["author"].is_object()) {
+      data["url"] = json["author"]["url"].string_value();
+    }
+    Sentry::addBreadcrumb("Load extension", data);
+  }
+#endif
+
+  auto extension = std::make_unique<Extension>(
+    path,
+    name,
+    version,
+    displayName,
+    // Extensions are enabled by default
+    get_config_bool("extensions", name.c_str(), true),
+    isBuiltinExtension);
 
   auto contributes = json["contributes"];
   if (contributes.is_object()) {
@@ -1072,15 +1151,19 @@ Extension* Extensions::loadExtension(const std::string& path,
       for (const auto& lang : languages.array_items()) {
         std::string langId = lang["id"].string_value();
         std::string langPath = lang["path"].string_value();
+        std::string langDisplayName = lang["displayName"].string_value();
 
         // The path must be always relative to the extension
         langPath = base::join_path(path, langPath);
 
-        LOG("EXT: New language id=%s path=%s\n",
+        LOG("EXT: New language id=%s path=%s displayName=%s\n",
             langId.c_str(),
-            langPath.c_str());
+            langPath.c_str(),
+            langDisplayName.c_str());
 
-        extension->addLanguage(langId, langPath);
+        extension->addLanguage(langId,
+                               langPath,
+                               langDisplayName);
       }
     }
 

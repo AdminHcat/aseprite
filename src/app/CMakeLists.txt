@@ -173,6 +173,7 @@ if(ENABLE_SCRIPTING)
     script/color_class.cpp
     script/color_space_class.cpp
     script/dialog_class.cpp
+    script/editor_class.cpp
     script/engine.cpp
     script/events_class.cpp
     script/frame_class.cpp
@@ -183,6 +184,7 @@ if(ENABLE_SCRIPTING)
     script/image_iterator_class.cpp
     script/image_spec_class.cpp
     script/images_class.cpp
+    script/json_class.cpp
     script/keys.cpp
     script/layer_class.cpp
     script/layers_class.cpp
@@ -196,6 +198,7 @@ if(ENABLE_SCRIPTING)
     script/properties_class.cpp
     script/range_class.cpp
     script/rectangle_class.cpp
+    script/require.cpp
     script/security.cpp
     script/selection_class.cpp
     script/site_class.cpp
@@ -211,8 +214,10 @@ if(ENABLE_SCRIPTING)
     script/tilesets_class.cpp
     script/timer_class.cpp
     script/tool_class.cpp
+    script/uuid_class.cpp
     script/values.cpp
     script/version_class.cpp
+    script/window_class.cpp
     shell.cpp
     ${scripting_files_ws}
     ${scripting_files_ui})
@@ -305,7 +310,6 @@ if(ENABLE_UI)
     commands/cmd_set_palette.cpp
     commands/cmd_set_palette_entry_size.cpp
     commands/cmd_set_same_ink.cpp
-    commands/cmd_show.cpp
     commands/cmd_slice_properties.cpp
     commands/cmd_sprite_properties.cpp
     commands/cmd_swap_checkerboard_colors.cpp
@@ -323,8 +327,11 @@ if(ENABLE_UI)
     commands/filters/filter_target_buttons.cpp
     commands/filters/filter_window.cpp
     commands/screenshot.cpp
+    commands/set_playback_speed.cpp
     commands/show_menu.cpp
     commands/tileset_mode.cpp
+    commands/toggle_other_layers_opacity.cpp
+    commands/toggle_play_option.cpp
     file_selector.cpp
     modules/gfx.cpp
     modules/gui.cpp
@@ -382,6 +389,7 @@ if(ENABLE_UI)
     ui/hex_color_entry.cpp
     ui/home_view.cpp
     ui/icon_button.cpp
+    ui/incompat_file_window.cpp
     ui/input_chain.cpp
     ui/keyboard_shortcuts.cpp
     ui/main_menu_bar.cpp
@@ -505,6 +513,7 @@ add_library(app-lib
   cmd/set_cel_frame.cpp
   cmd/set_cel_opacity.cpp
   cmd/set_cel_position.cpp
+  cmd/set_cel_zindex.cpp
   cmd/set_frame_duration.cpp
   cmd/set_grid_bounds.cpp
   cmd/set_last_point.cpp
@@ -578,6 +587,7 @@ add_library(app-lib
   commands/cmd_palette_size.cpp
   commands/cmd_remove_layer.cpp
   commands/cmd_save_file.cpp
+  commands/cmd_show.cpp
   commands/cmd_sprite_size.cpp
   commands/cmd_undo.cpp
   commands/command.cpp
@@ -639,6 +649,7 @@ add_library(app-lib
   modules/palettes.cpp
   pref/preferences.cpp
   recent_files.cpp
+  render/shader_renderer.cpp
   render/simple_renderer.cpp
   res/palettes_loader_delegate.cpp
   res/resources_loader.cpp
@@ -684,6 +695,7 @@ add_library(app-lib
   util/range_utils.cpp
   util/readable_time.cpp
   util/resize_image.cpp
+  util/tileset_utils.cpp
   util/wrap_point.cpp
   xml_document.cpp
   xml_exception.cpp

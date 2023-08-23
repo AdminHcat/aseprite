@@ -18,6 +18,7 @@
 #include "app/script/graphics_context.h"
 #include "app/script/keys.h"
 #include "app/script/luacpp.h"
+#include "app/ui/button_set.h"
 #include "app/ui/color_button.h"
 #include "app/ui/color_shades.h"
 #include "app/ui/expr_entry.h"
@@ -30,14 +31,17 @@
 #include "ui/combobox.h"
 #include "ui/display.h"
 #include "ui/entry.h"
+#include "ui/fit_bounds.h"
 #include "ui/grid.h"
 #include "ui/label.h"
 #include "ui/manager.h"
 #include "ui/menu.h"
 #include "ui/message.h"
+#include "ui/scale.h"
 #include "ui/separator.h"
 #include "ui/slider.h"
 #include "ui/system.h"
+#include "ui/view.h"
 #include "ui/window.h"
 
 #include <map>
@@ -61,13 +65,22 @@ std::vector<Dialog*> all_dialogs;
 
 struct Dialog {
   ui::Window window;
+  // Main grid that holds the dialog content.
   ui::Grid grid;
+  // Pointer to current grid (might be the main grid or a tab's grid).
+  ui::Grid* currentGrid;
   ui::HBox* hbox = nullptr;
   bool autoNewRow = false;
   WidgetsList mainWidgets;
   std::map<std::string, ui::Widget*> dataWidgets;
   std::map<std::string, ui::Widget*> labelWidgets;
   int currentRadioGroup = 0;
+
+  // Members used to hold current state about the creation of a group
+  // of tabs. After creation, these members are reset to their initial
+  // empty state to be ready for the next group of tabs.
+  std::vector<ui::Grid*> tabs;
+  HBox* tabsSelector = nullptr;
 
   // Used to create a new row when a different kind of widget is added
   // in the dialog.
@@ -86,7 +99,8 @@ struct Dialog {
   Dialog(const ui::Window::Type windowType,
          const std::string& title)
     : window(windowType, title),
-      grid(2, false) {
+      grid(2, false),
+      currentGrid(&grid) {
     window.addChild(&grid);
     all_dialogs.push_back(this);
   }
@@ -183,6 +197,67 @@ struct Dialog {
     }
   }
 
+  // TODO merge this code with add_scrollbars_if_needed() from
+  //      ui/menu.cpp (creating a new function in the ui library)
+  void addScrollbarsIfNeeded(const gfx::Rect& workarea,
+                             gfx::Rect& bounds)
+  {
+    gfx::Rect rc = bounds;
+
+    if (rc.x < workarea.x) {
+      rc.w -= (workarea.x - rc.x);
+      rc.x = workarea.x;
+    }
+    if (rc.x2() > workarea.x2()) {
+      rc.w = workarea.x2() - rc.x;
+    }
+
+    bool vscrollbarsAdded = false;
+    if (rc.y < workarea.y) {
+      rc.h -= (workarea.y - rc.y);
+      rc.y = workarea.y;
+      vscrollbarsAdded = true;
+    }
+    if (rc.y2() > workarea.y2()) {
+      rc.h = workarea.y2() - rc.y;
+      vscrollbarsAdded = true;
+    }
+
+    gfx::Rect newRc = rc;
+    if (get_multiple_displays() && window.shouldCreateNativeWindow()) {
+      const os::Window* nativeWindow = const_cast<ui::Display*>(parentDisplay())->nativeWindow();
+      newRc.setOrigin(nativeWindow->pointFromScreen(rc.origin()));
+      newRc.setSize(rc.size() / nativeWindow->scale());
+    }
+    if (newRc == window.bounds())
+      return;
+
+    View* view = new View();
+    view->InitTheme.connect([view]{ view->noBorderNoChildSpacing(); });
+    view->initTheme();
+
+    if (vscrollbarsAdded) {
+      int barWidth = view->verticalBar()->getBarWidth();;
+      if (get_multiple_displays())
+        barWidth *= window.display()->scale();
+
+      rc.w += 2*barWidth;
+      if (rc.x2() > workarea.x2()) {
+        rc.x = workarea.x2() - rc.w;
+        if (rc.x < workarea.x) {
+          rc.x = workarea.x;
+          rc.w = workarea.w;
+        }
+      }
+    }
+
+    // New bounds
+    bounds = rc;
+
+    window.removeChild(&grid);
+    view->attachToView(&grid);
+    window.addChild(view);
+  }
 };
 
 template<typename...Args,
@@ -326,6 +401,7 @@ int Dialog_show(lua_State* L)
   dlg->refShow(L);
 
   bool wait = true;
+  bool autoScrollbars = false;
   obs::scoped_connection conn;
   if (lua_istable(L, 2)) {
     int type = lua_getfield(L, 2, "wait");
@@ -343,6 +419,24 @@ int Dialog_show(lua_State* L)
       }
     }
     lua_pop(L, 1);
+
+    type = lua_getfield(L, 2, "autoscrollbars");
+    if (type == LUA_TBOOLEAN)
+      autoScrollbars = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+  }
+
+  if (autoScrollbars) {
+    dlg->window.remapWindow();
+    dlg->window.centerWindow();
+    fit_bounds(dlg->parentDisplay(),
+              &dlg->window,
+              dlg->window.bounds(),
+              [dlg](const gfx::Rect& workarea,
+                    gfx::Rect& bounds,
+                    std::function<gfx::Rect(Widget*)> getWidgetBounds) {
+                dlg->addScrollbarsIfNeeded(workarea, bounds);
+              });
   }
 
   if (wait)
@@ -470,10 +564,11 @@ int Dialog_add_widget(lua_State* L, Widget* widget)
     // specific widget is not expansive (e.g. a canvas with a fixed
     // size)
     type = lua_getfield(L, 2, "hexpand");
+    if (type != LUA_TNIL) hexpand = lua_toboolean(L, -1);
+    lua_pop(L, 1);
     type = lua_getfield(L, 2, "vexpand");
-    if (type != LUA_TNIL) hexpand = lua_toboolean(L, -2);
     if (type != LUA_TNIL) vexpand = lua_toboolean(L, -1);
-    lua_pop(L, 2);
+    lua_pop(L, 1);
   }
 
   if (label || !dlg->hbox) {
@@ -482,18 +577,18 @@ int Dialog_add_widget(lua_State* L, Widget* widget)
       if (!visible)
         labelWidget->setVisible(false);
 
-      dlg->grid.addChildInCell(labelWidget, 1, 1, ui::LEFT | ui::TOP);
+      dlg->currentGrid->addChildInCell(labelWidget, 1, 1, ui::LEFT | ui::TOP);
       if (!id.empty())
         dlg->labelWidgets[id] = labelWidget;
     }
     else
-      dlg->grid.addChildInCell(new ui::HBox, 1, 1, ui::LEFT | ui::TOP);
+      dlg->currentGrid->addChildInCell(new ui::HBox, 1, 1, ui::LEFT | ui::TOP);
 
     auto hbox = new ui::HBox;
     if (widget->type() == ui::kButtonWidget)
       hbox->enableFlags(ui::HOMOGENEOUS);
 
-    dlg->grid.addChildInCell(
+    dlg->currentGrid->addChildInCell(
       hbox, 1, 1,
       ui::HORIZONTAL | (vexpand ? ui::VERTICAL: ui::TOP));
 
@@ -614,7 +709,7 @@ int Dialog_button_base(lua_State* L, T** outputWidget = nullptr)
     if (type == LUA_TFUNCTION) {
       Dialog_connect_signal(
         L, 1, widget->Click,
-        [dlg, widget](lua_State* L){
+        [](lua_State*){
           // Do nothing
         });
       closeWindowByDefault = false;
@@ -623,7 +718,7 @@ int Dialog_button_base(lua_State* L, T** outputWidget = nullptr)
   }
 
   if (closeWindowByDefault) {
-    widget->Click.connect([dlg, widget](){
+    widget->Click.connect([widget](){
       widget->closeWindow();
     });
   }
@@ -1016,7 +1111,10 @@ static void fill_keymessage_values(lua_State* L, const ui::KeyMessage* msg)
 
   // KeyMessage specifics
   lua_pushinteger(L, msg->repeat());
-  lua_setfield(L, -2, "repeat");
+  lua_setfield(L, -2, "repeat"); // Only for backward compatibility, remove this in a future
+
+  lua_pushinteger(L, msg->repeat());
+  lua_setfield(L, -2, "repeatCount");
 
   // TODO improve this (create an Event metatable)
   lua_pushcfunction(L, [](lua_State*) -> int {
@@ -1099,6 +1197,24 @@ int Dialog_canvas(lua_State* L)
     }
     lua_pop(L, 1);
 
+    type = lua_getfield(L, 2, "autoscaling");
+    if (type != LUA_TNIL) {
+      widget->setAutoScaling(lua_toboolean(L, -1));
+    }
+    lua_pop(L, 1);
+
+    // Backward compatibility with "autoScaling" parameter.
+    if (type == LUA_TNIL) {
+      type = lua_getfield(L, 2, "autoScaling");
+      if (type != LUA_TNIL) {
+        widget->setAutoScaling(lua_toboolean(L, -1));
+      }
+      lua_pop(L, 1);
+    }
+
+    if (widget->isAutoScaling())
+      sz *= ui::guiscale();
+
     widget->setSizeHint(sz);
 
     bool handleKeyEvents = false;
@@ -1146,6 +1262,12 @@ int Dialog_canvas(lua_State* L)
       }
       lua_pop(L, 1);
 
+      type = lua_getfield(L, 2, "ondblclick");
+      if (type == LUA_TFUNCTION) {
+        Dialog_connect_signal(L, 1, widget->DoubleClick, fill_mousemessage_values);
+      }
+      lua_pop(L, 1);
+
       type = lua_getfield(L, 2, "onwheel");
       if (type == LUA_TFUNCTION) {
         Dialog_connect_signal(L, 1, widget->Wheel, fill_mousemessage_values);
@@ -1166,6 +1288,118 @@ int Dialog_canvas(lua_State* L)
   }
 
   return Dialog_add_widget(L, widget);
+}
+
+int Dialog_tab(lua_State* L)
+{
+  auto dlg = get_obj<Dialog>(L, 1);
+
+  std::string text;
+  if (lua_istable(L, 2)) {
+    int type = lua_getfield(L, 2, "text");
+    if (type != LUA_TNIL) {
+      text = lua_tostring(L, -1);
+    }
+    lua_pop(L, 1);
+  }
+
+  auto tabContent = new ui::Grid(2, false);
+  tabContent->setVisible(false);
+  tabContent->setText(text);
+  dlg->tabs.push_back(tabContent);
+  dlg->currentGrid = tabContent;
+
+  // If this is the first tab create the tabs selector container.
+  if (dlg->tabs.size() == 1) {
+    dlg->tabsSelector = new HBox();
+    dlg->grid.addChildInCell(dlg->tabsSelector, 2, 1, ui::HORIZONTAL);
+  }
+
+  dlg->grid.addChildInCell(tabContent, 2, 1, ui::HORIZONTAL | ui::VERTICAL);
+  lua_pushvalue(L, 1);
+  return 1;
+}
+
+int Dialog_endtabs(lua_State* L)
+{
+  auto dlg = get_obj<Dialog>(L, 1);
+
+  // There is no starting :tab(), do nothing then.
+  if (dlg->tabs.empty()) {
+    lua_pushvalue(L, 1);
+    return 1;
+  }
+
+  int selectedTab = 0;
+  int align = ui::CENTER;
+  if (lua_istable(L, 2)) {
+    int type = lua_getfield(L, 2, "selected");
+    switch (type) {
+      case LUA_TSTRING: {
+        // Find the tab index with the specified text.
+        std::string selTabText = lua_tostring(L, -1);
+        for (int i=0; i<dlg->tabs.size(); ++i) {
+          if (dlg->tabs[i]->text() == selTabText) {
+            selectedTab = i;
+            break;
+          }
+        }
+        break;
+      }
+      case LUA_TNUMBER:
+        selectedTab = std::clamp<int>(lua_tointeger(L, -1), 1, dlg->tabs.size()) - 1;
+        break;
+    }
+    lua_pop(L, 1);
+
+    type = lua_getfield(L, 2, "align");
+    if(type != LUA_TNIL) {
+      int v = lua_tointeger(L, -1) & (ui::CENTER | ui::LEFT | ui::RIGHT);
+      // Set align only if it has a valid value.
+      if (v) align = v;
+    }
+    lua_pop(L, 1);
+  }
+
+  // Create the tabs selector's buttonset
+  auto widget = new app::ButtonSet(dlg->tabs.size());
+  for (int i=0; i<dlg->tabs.size(); ++i) {
+    auto item = widget->addItem(dlg->tabs[i]->text());
+    item->setSelected(i == selectedTab);
+    dlg->tabs[i]->setVisible(i == selectedTab);
+  }
+  auto tabs = dlg->tabs;
+  widget->ItemChange.connect([dlg, tabs](ButtonSet::Item* selItem) {
+    for (auto tab : tabs) {
+      tab->setVisible(selItem->text() ==  tab->text());
+    }
+    dlg->window.remapWindow();
+  });
+  widget->initTheme();
+  ui::Separator* sep;
+  if (align & ui::CENTER || align & ui::RIGHT) {
+    sep = new ui::Separator("", ui::HORIZONTAL);
+    sep->setExpansive(true);
+    dlg->tabsSelector->addChild(sep);
+  }
+  dlg->tabsSelector->addChild(widget);
+  if (align & ui::CENTER || align & ui::LEFT) {
+    sep = new ui::Separator("", ui::HORIZONTAL);
+    sep->setExpansive(true);
+    dlg->tabsSelector->addChild(sep);
+  }
+  // Add tab's bottom separator
+  sep = new ui::Separator("", ui::HORIZONTAL);
+  sep->setExpansive(true);
+  dlg->grid.addChildInCell(sep, 2, 1, ui::HORIZONTAL);
+
+  // Clear state to be ready for the next tabs creation
+  dlg->tabsSelector = nullptr;
+  dlg->tabs.clear();
+  dlg->currentGrid = &dlg->grid;
+
+  lua_pushvalue(L, 1);
+  return 1;
 }
 
 int Dialog_modify(lua_State* L)
@@ -1352,7 +1586,11 @@ int Dialog_modify(lua_State* L)
 
     // TODO shades mode? file title / open / save / filetypes? on* events?
 
-    if (relayout) {
+    // Relayout only if the the dialog window is not being resized.
+    // This is due to the possibility of a script calling a method
+    // to modify dialog's properties (which might generate a relayout)
+    // during an ongoing resize event.
+    if (relayout && !dlg->window.isResizing()) {
       dlg->window.layout();
 
       gfx::Rect bounds(dlg->window.bounds().w,
@@ -1605,6 +1843,8 @@ const luaL_Reg Dialog_methods[] = {
   { "shades", Dialog_shades },
   { "file", Dialog_file },
   { "canvas", Dialog_canvas },
+  { "tab", Dialog_tab },
+  { "endtabs", Dialog_endtabs },
   { "modify", Dialog_modify },
   { "repaint", Dialog_repaint },
   { nullptr, nullptr }

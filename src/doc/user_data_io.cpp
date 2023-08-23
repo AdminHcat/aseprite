@@ -112,6 +112,13 @@ static void write_property_value(std::ostream& os, const UserData::Variant& vari
       }
       break;
     }
+    case USER_DATA_PROPERTY_TYPE_UUID: {
+      auto uuid = get_value<base::Uuid>(variant);
+      for (int i=0; i<16; ++i) {
+        write8(os, uuid[i]);
+      }
+      break;
+    }
   }
 }
 
@@ -227,6 +234,14 @@ static UserData::Variant read_property_value(std::istream& is, uint16_t type)
       }
       return value;
     }
+    case USER_DATA_PROPERTY_TYPE_UUID: {
+      base::Uuid value;
+      uint8_t* bytes = value.bytes();
+      for (int i=0; i<16; ++i) {
+        bytes[i] = read8(is);
+      }
+      return value;
+    }
   }
 
   return doc::UserData::Variant{};
@@ -244,7 +259,7 @@ static UserData::PropertiesMaps read_properties_maps(std::istream& is)
   return propertiesMaps;
 }
 
-UserData read_user_data(std::istream& is)
+UserData read_user_data(std::istream& is, const int docFormatVer)
 {
   UserData userData;
   userData.setText(read_string(is));
@@ -255,7 +270,12 @@ UserData read_user_data(std::istream& is)
   // 0xffffffff in 32-bit).
   if (!is.eof()) {
     userData.setColor(read32(is));
-    userData.propertiesMaps() = read_properties_maps(is);
+    // When recovering a session from an old Aseprite version, we need
+    // to skip reading the parts that it doesn't contains. Otherwise
+    // it is very likely to fail.
+    if (docFormatVer >= DOC_FORMAT_VERSION_2) {
+      userData.propertiesMaps() = read_properties_maps(is);
+    }
   }
   return userData;
 }

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2022  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -135,7 +135,7 @@ bool SelectBoxState::onMouseDown(Editor* editor, MouseMessage* msg)
       editor->screenToEditor(msg->position())
       - editor->mainTilePosition();
 
-    if (hasFlag(Flags::Rulers)) {
+    if (hasFlag(Flags::Rulers) && !hasFlag(Flags::QuickPoint)) {
       m_rulersDragAlign = hitTestRulers(editor, msg->position(), true);
       if (m_rulersDragAlign)
         m_startRulers = m_rulers; // Capture start positions
@@ -145,6 +145,10 @@ bool SelectBoxState::onMouseDown(Editor* editor, MouseMessage* msg)
       m_selectingBox = true;
       m_selectingButton = msg->button();
       setBoxBounds(gfx::Rect(m_startingPos, gfx::Size(1, 1)));
+
+      // Redraw the editor so we can show the pixel where the mouse
+      // button is pressed for first time.
+      editor->invalidate();
     }
 
     editor->captureMouse();
@@ -224,6 +228,9 @@ bool SelectBoxState::onMouseMove(Editor* editor, MouseMessage* msg)
       editor->screenToEditor(msg->position())
       - editor->mainTilePosition();
 
+    if (hasFlag(Flags::QuickPoint))
+      p1 = p2;
+
     if (p2.x < p1.x) std::swap(p1.x, p2.x);
     if (p2.y < p1.y) std::swap(p1.y, p2.y);
     ++p2.x;
@@ -249,7 +256,7 @@ bool SelectBoxState::onMouseMove(Editor* editor, MouseMessage* msg)
 
 bool SelectBoxState::onSetCursor(Editor* editor, const gfx::Point& mouseScreenPos)
 {
-  if (hasFlag(Flags::Rulers)) {
+  if (hasFlag(Flags::Rulers) && !hasFlag(Flags::QuickPoint)) {
     if (!m_movingRulers.empty()) {
       editor->showMouseCursor(cursorFromAlign(m_rulersDragAlign));
       return true;

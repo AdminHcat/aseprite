@@ -46,7 +46,8 @@ void DocUndo::add(CmdTransaction* cmd)
   ASSERT(cmd);
 
   if (m_undoing) {
-    Console(m_ctx).printf("Error running scripts: Adding undo information when navigating undo history");
+    delete cmd;
+    throw CannotModifyWhenUndoingException();
   }
 
   UNDO_TRACE("UNDO: Add state <%s> of %s to %s\n",
@@ -104,7 +105,7 @@ bool DocUndo::canRedo() const
 void DocUndo::undo()
 {
   ASSERT(!m_undoing);
-  base::ScopedValue undoing(m_undoing, true, false);
+  base::ScopedValue undoing(m_undoing, true);
   const size_t oldSize = m_totalUndoSize;
   {
     const undo::UndoState* state = nextUndo();
@@ -126,7 +127,7 @@ void DocUndo::undo()
 void DocUndo::redo()
 {
   ASSERT(!m_undoing);
-  base::ScopedValue undoing(m_undoing, true, false);
+  base::ScopedValue undoing(m_undoing, true);
   const size_t oldSize = m_totalUndoSize;
   {
     const undo::UndoState* state = nextRedo();
@@ -277,6 +278,9 @@ Cmd* DocUndo::lastExecutedCmd() const
 
 void DocUndo::moveToState(const undo::UndoState* state)
 {
+  ASSERT(!m_undoing);
+  base::ScopedValue undoing(m_undoing, true);
+
   m_undoHistory.moveTo(state);
 
   // After onCurrentUndoStateChange don't use the "state" argument, it

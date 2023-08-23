@@ -162,7 +162,7 @@ public:
     , m_brushes(App::instance()->brushes()) {
     SkinPartPtr part(new SkinPart);
     part->setBitmap(0, BrushPopup::createSurfaceForBrush(BrushRef(nullptr)));
-    addItem(part);
+    addItem(part, "brush_type");
 
     m_popupWindow.Open.connect(
       [this]{
@@ -182,7 +182,11 @@ public:
     part->setBitmap(0, BrushPopup::createSurfaceForBrush(brush));
 
     const bool mono = (brush->type() != kImageBrushType);
-    getItem(0)->setIcon(part, mono);
+    getItem(0)->setIcon(part);
+    auto style = mono ? SkinTheme::instance()->styles.brushTypeMono() :
+                        SkinTheme::instance()->styles.brushType();
+    getItem(0)->setStyle(style);
+
   }
 
   void switchPopup() {
@@ -253,7 +257,7 @@ private:
       return;
 
     IntEntry::onValueChange();
-    base::ScopedValue<bool> lockFlag(g_updatingFromCode, true, g_updatingFromCode);
+    base::ScopedValue lockFlag(g_updatingFromCode, true);
 
     Tool* tool = App::instance()->activeTool();
     Preferences::instance().tool(tool).brush.size(getValue());
@@ -274,7 +278,7 @@ protected:
       return;
 
     IntEntry::onValueChange();
-    base::ScopedValue<bool> lockFlag(g_updatingFromCode, true, g_updatingFromCode);
+    base::ScopedValue lockFlag(g_updatingFromCode, true);
 
     Tool* tool = App::instance()->activeTool();
     Preferences::instance().tool(tool).brush.angle(getValue());
@@ -380,7 +384,7 @@ class ContextBar::PaintBucketSettingsField : public ButtonSet {
 public:
   PaintBucketSettingsField() : ButtonSet(1) {
     auto theme = SkinTheme::get(this);
-    addItem(theme->parts.timelineGear());
+    addItem(theme->parts.timelineGear(), "context_bar_button");
   }
 
 protected:
@@ -454,6 +458,7 @@ protected:
         }
       });
 
+    menu.initTheme();
     menu.showPopup(gfx::Point(bounds.x, bounds.y2()),
                    display());
     deselectItems();
@@ -466,7 +471,7 @@ public:
   InkTypeField(ContextBar* owner) : ButtonSet(1)
                                   , m_owner(owner) {
     auto theme = SkinTheme::get(this);
-    addItem(theme->parts.inkSimple());
+    addItem(theme->parts.inkSimple(), "ink_type");
   }
 
   void setInkType(InkType inkType) {
@@ -713,7 +718,7 @@ protected:
       return;
 
     IntEntry::onValueChange();
-    base::ScopedValue<bool> lockFlag(g_updatingFromCode, true, g_updatingFromCode);
+    base::ScopedValue lockFlag(g_updatingFromCode, true);
 
     int newValue = getValue();
     Preferences& pref = Preferences::instance();
@@ -863,7 +868,7 @@ class ContextBar::PivotField : public ButtonSet {
 public:
   PivotField()
     : ButtonSet(1) {
-    addItem(SkinTheme::get(this)->parts.pivotCenter());
+    addItem(SkinTheme::get(this)->parts.pivotCenter(), "pivot_field");
 
     m_pivotConn = Preferences::instance().selection.pivotPosition.AfterChange.connect(
       [this]{ onPivotChange(); });
@@ -883,15 +888,15 @@ private:
     CheckBox visible(Strings::context_bar_default_display_pivot());
     HBox box;
     ButtonSet buttonset(3);
-    buttonset.addItem(theme->parts.pivotNorthwest());
-    buttonset.addItem(theme->parts.pivotNorth());
-    buttonset.addItem(theme->parts.pivotNortheast());
-    buttonset.addItem(theme->parts.pivotWest());
-    buttonset.addItem(theme->parts.pivotCenter());
-    buttonset.addItem(theme->parts.pivotEast());
-    buttonset.addItem(theme->parts.pivotSouthwest());
-    buttonset.addItem(theme->parts.pivotSouth());
-    buttonset.addItem(theme->parts.pivotSoutheast());
+    buttonset.addItem(theme->parts.pivotNorthwest(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotNorth(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotNortheast(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotWest(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotCenter(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotEast(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotSouthwest(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotSouth(), "pivot_dir");
+    buttonset.addItem(theme->parts.pivotSoutheast(), "pivot_dir");
     box.addChild(&buttonset);
 
     menu.addChild(&visible);
@@ -902,6 +907,7 @@ private:
     app::gen::PivotPosition pos = Preferences::instance().selection.pivotPosition();
     visible.setSelected(isVisible);
     buttonset.setSelectedItem(int(pos));
+    buttonset.initTheme();
 
     visible.Click.connect(
       [&visible](){
@@ -1144,7 +1150,9 @@ public:
   DynamicsField(ContextBar* ctxBar)
     : ButtonSet(1)
     , m_ctxBar(ctxBar) {
-    addItem(SkinTheme::get(this)->parts.dynamics());
+    addItem(SkinTheme::get(this)->parts.dynamics(), "dynamics_field");
+
+    loadDynamicsPref();
   }
 
   void switchPopup() {
@@ -1154,15 +1162,27 @@ public:
       return;
     }
 
-    if (!m_popup) {
+    if (!m_popup.get())
       m_popup.reset(new DynamicsPopup(this));
-      m_popup->setOptionsGridVisibility(m_optionsGridVisibility);
-      m_popup->Close.connect(
-        [this](CloseEvent&){
-          deselectItems();
-          m_dynamics = m_popup->getDynamics();
-        });
-    }
+    auto activeTool = App::instance()->activeTool();
+    m_popup->loadDynamicsPref();
+    m_dynamics = m_popup->getDynamics();
+    m_sameInAllTools = m_popup->sharedSettings();
+    m_popup->Close.connect(
+      [this](CloseEvent&) {
+        deselectItems();
+        auto activeTool = App::instance()->activeTool();
+        m_dynamics = m_popup->getDynamics();
+        m_sameInAllTools = m_popup->sharedSettings();
+        if (m_sameInAllTools) {
+          for (Tool* tool : *App::instance()->toolBox())
+            saveDynamicsPref(tool);
+        }
+        else
+          saveDynamicsPref(activeTool);
+      });
+
+    m_popup->refreshVisibility();
 
     const gfx::Rect bounds = this->bounds();
     m_popup->remapWindow();
@@ -1184,6 +1204,48 @@ public:
     m_optionsGridVisibility = state;
     if (m_popup)
       m_popup->setOptionsGridVisibility(state);
+  }
+
+  void saveDynamicsPref(Tool* tool) {
+    auto& dynaPref = Preferences::instance().tool(tool).dynamics;
+    dynaPref.stabilizer(m_dynamics.stabilizer);
+    dynaPref.stabilizerFactor(m_dynamics.stabilizerFactor);
+    dynaPref.size(m_dynamics.size);
+    dynaPref.angle(m_dynamics.angle);
+    dynaPref.gradient(m_dynamics.gradient);
+    dynaPref.minSize.setValue(m_dynamics.minSize);
+    dynaPref.minAngle.setValue(m_dynamics.minAngle);
+    dynaPref.minPressureThreshold(m_dynamics.minPressureThreshold);
+    dynaPref.minVelocityThreshold(m_dynamics.minVelocityThreshold);
+    dynaPref.maxPressureThreshold(m_dynamics.maxPressureThreshold);
+    dynaPref.maxVelocityThreshold(m_dynamics.maxVelocityThreshold);
+    dynaPref.colorFromTo(m_dynamics.colorFromTo);
+    dynaPref.matrixIndex(m_popup->ditheringIndex());
+    Preferences::instance().shared.shareDynamics(m_sameInAllTools);
+  }
+
+  void loadDynamicsPref() {
+    auto& dynaPref = Preferences::instance()
+      .tool(App::instance()->activeTool()).dynamics;
+    m_dynamics.stabilizer = dynaPref.stabilizer();
+    m_dynamics.stabilizerFactor = dynaPref.stabilizerFactor();
+    m_dynamics.size = dynaPref.size();
+    m_dynamics.angle = dynaPref.angle();
+    m_dynamics.gradient = dynaPref.gradient();
+    m_dynamics.minSize = dynaPref.minSize();
+    m_dynamics.minAngle = dynaPref.minAngle();
+    m_dynamics.minPressureThreshold = dynaPref.minPressureThreshold();
+    m_dynamics.minVelocityThreshold = dynaPref.minVelocityThreshold();
+    m_dynamics.maxPressureThreshold = dynaPref.maxPressureThreshold();
+    m_dynamics.maxVelocityThreshold = dynaPref.maxVelocityThreshold();
+    m_dynamics.colorFromTo = dynaPref.colorFromTo();
+
+    DitheringSelector matrixSel(DitheringSelector::SelectMatrix);
+    matrixSel.setSelectedItemIndex(dynaPref.matrixIndex());
+    render::DitheringMatrix matrix(matrixSel.ditheringMatrix());
+    m_dynamics.ditheringMatrix = matrix;
+
+    m_sameInAllTools = Preferences::instance().shared.shareDynamics();
   }
 
 private:
@@ -1219,6 +1281,7 @@ private:
   ContextBar* m_ctxBar;
   mutable tools::DynamicsOptions m_dynamics;
   bool m_optionsGridVisibility = true;
+  bool m_sameInAllTools = false;
 };
 
 class ContextBar::FreehandAlgorithmField : public CheckBox {
@@ -1276,8 +1339,8 @@ public:
   GradientTypeField() : ButtonSet(2) {
     auto theme = SkinTheme::get(this);
 
-    addItem(theme->parts.linearGradient());
-    addItem(theme->parts.radialGradient());
+    addItem(theme->parts.linearGradient(), "context_bar_button");
+    addItem(theme->parts.radialGradient(), "context_bar_button");
 
     setSelectedItem(0);
   }
@@ -1299,8 +1362,8 @@ public:
   DropPixelsField() : ButtonSet(2) {
     auto theme = SkinTheme::get(this);
 
-    addItem(theme->parts.dropPixelsOk());
-    addItem(theme->parts.dropPixelsCancel());
+    addItem(theme->parts.dropPixelsOk(), "context_bar_button");
+    addItem(theme->parts.dropPixelsCancel(), "context_bar_button");
     setOfferCapture(false);
   }
 
@@ -1407,9 +1470,9 @@ public:
   SymmetryField() : ButtonSet(3) {
     setMultiMode(MultiMode::Set);
     auto theme = SkinTheme::get(this);
-    addItem(theme->parts.horizontalSymmetry());
-    addItem(theme->parts.verticalSymmetry());
-    addItem("...");
+    addItem(theme->parts.horizontalSymmetry(), "symmetry_field");
+    addItem(theme->parts.verticalSymmetry(), "symmetry_field");
+    addItem("...", "symmetry_options");
   }
 
   void setupTooltips(TooltipManager* tooltipManager) {
@@ -1544,8 +1607,8 @@ public:
     m_combobox.setExpansive(true);
     m_combobox.setMinSize(gfx::Size(256*guiscale(), 0));
 
-    m_action.addItem(theme->parts.iconUserData())->setMono(true);
-    m_action.addItem(theme->parts.iconClose())->setMono(true);
+    m_action.addItem(theme->parts.iconUserData(), "buttonset_item_icon_mono");
+    m_action.addItem(theme->parts.iconClose(), "buttonset_item_icon_mono");
     m_action.ItemChange.connect(
       [this](ButtonSet::Item* item){
         onAction(m_action.selectedItem());
@@ -1964,7 +2027,7 @@ void ContextBar::updateForTool(tools::Tool* tool)
   // ContextBar elements.
 
   const bool oldUpdatingFromCode = g_updatingFromCode;
-  base::ScopedValue<bool> lockFlag(g_updatingFromCode, true, oldUpdatingFromCode);
+  base::ScopedValue lockFlag(g_updatingFromCode, true);
 
   ToolPreferences* toolPref = nullptr;
   ToolPreferences::Brush* brushPref = nullptr;

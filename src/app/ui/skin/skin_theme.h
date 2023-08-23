@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020-2022  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -34,6 +34,17 @@ namespace app {
 
     class FontData;
 
+    class ThemeFont {
+      public:
+        ThemeFont() {}
+        ThemeFont(os::FontRef font, bool mnemonics) : m_font(font), m_mnemonics(mnemonics) {}
+        os::FontRef font() { return m_font; }
+        bool mnemonics() { return m_mnemonics; }
+      private:
+        os::FontRef m_font;
+        bool m_mnemonics;
+    };
+
     // This is the GUI theme used by Aseprite (which use images from
     // data/skins directory).
     class SkinTheme : public ui::Theme
@@ -54,6 +65,13 @@ namespace app {
       os::Font* getDefaultFont() const override { return m_defaultFont.get(); }
       os::Font* getWidgetFont(const ui::Widget* widget) const override;
       os::Font* getMiniFont() const { return m_miniFont.get(); }
+      os::Font* getUnscaledFont(os::Font* font) const {
+        auto it = m_unscaledFonts.find(font);
+        if (it != m_unscaledFonts.end())
+          return it->second.get();
+        else
+          return font;
+      }
 
       ui::Cursor* getStandardCursor(ui::CursorType type) override;
       void initWidget(ui::Widget* widget) override;
@@ -79,6 +97,7 @@ namespace app {
                     os::Surface* e, os::Surface* se, os::Surface* s,
                     os::Surface* sw, os::Surface* w);
       void drawRect(ui::Graphics* g, const gfx::Rect& rc, SkinPart* skinPart, const bool drawCenter = true);
+      void drawRectUsingUnscaledSheet(ui::Graphics* g, const gfx::Rect& rc, SkinPart* skinPart, const bool drawCenter = true);
       void drawRect2(ui::Graphics* g, const gfx::Rect& rc, int x_mid, SkinPart* nw1, SkinPart* nw2);
       void drawHline(ui::Graphics* g, const gfx::Rect& rc, SkinPart* skinPart);
       void drawVline(ui::Graphics* g, const gfx::Rect& rc, SkinPart* skinPart);
@@ -95,6 +114,14 @@ namespace app {
       SkinPartPtr getPartById(const std::string& id) const {
         auto it = m_parts_by_id.find(id);
         if (it != m_parts_by_id.end())
+          return it->second;
+        else
+          return SkinPartPtr(nullptr);
+      }
+
+      SkinPartPtr getUnscaledPartById(const std::string& id) const {
+        auto it = m_unscaledParts_by_id.find(id);
+        if (it != m_unscaledParts_by_id.end())
           return it->second;
         else
           return SkinPartPtr(nullptr);
@@ -130,7 +157,7 @@ namespace app {
       void onRegenerateTheme() override;
 
     private:
-      struct BackwardCompatibility;
+      class BackwardCompatibility;
 
       void loadFontData();
       void loadAll(const std::string& themeId,
@@ -139,6 +166,7 @@ namespace app {
       void loadXml(BackwardCompatibility* backward);
 
       os::SurfaceRef sliceSheet(os::SurfaceRef sur, const gfx::Rect& bounds);
+      os::SurfaceRef sliceUnscaledSheet(os::SurfaceRef sur, const gfx::Rect& bounds);
       gfx::Color getWidgetBgColor(ui::Widget* widget);
       void drawText(ui::Graphics* g,
                     const char* t,
@@ -154,14 +182,20 @@ namespace app {
 
       std::string m_path;
       os::SurfaceRef m_sheet;
+      // Contains the sheet surface as is, without any scale.
+      os::SurfaceRef m_unscaledSheet;
       std::map<std::string, SkinPartPtr> m_parts_by_id;
+      // Stores the same SkinParts as m_parts_by_id but unscaled, using the same keys.
+      std::map<std::string, SkinPartPtr> m_unscaledParts_by_id;
       std::map<std::string, gfx::Color> m_colors_by_id;
       std::map<std::string, int> m_dimensions_by_id;
       std::map<std::string, ui::Cursor*> m_cursors;
       std::array<ui::Cursor*, ui::kCursorTypes> m_standardCursors;
       std::map<std::string, ui::Style*> m_styles;
       std::map<std::string, FontData*> m_fonts;
-      std::map<std::string, os::FontRef> m_themeFonts;
+      std::map<std::string, ThemeFont> m_themeFonts;
+      // Stores the unscaled font version of the Font pointer used as a key.
+      std::map<os::Font*, os::FontRef> m_unscaledFonts;
       os::FontRef m_defaultFont;
       os::FontRef m_miniFont;
       int m_preferredScreenScaling;

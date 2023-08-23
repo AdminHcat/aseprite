@@ -246,7 +246,7 @@ Timeline::Timeline(TooltipManager* tooltipManager)
   , m_tagBands(0)
   , m_tagFocusBand(-1)
   , m_separator_x(
-      Preferences::instance().general.timelineLayerPanelWidth() * guiscale())
+      Preferences::instance().general.timelineLayerPanelWidth())
   , m_separator_w(1)
   , m_confPopup(nullptr)
   , m_clipboard_timer(100, this)
@@ -277,8 +277,9 @@ Timeline::Timeline(TooltipManager* tooltipManager)
 
 Timeline::~Timeline()
 {
+  // Save unscaled separator
   Preferences::instance().general.timelineLayerPanelWidth(
-    m_separator_x / guiscale());
+    m_separator_x);
 
   m_clipboard_timer.stop();
 
@@ -388,6 +389,8 @@ void Timeline::updateUsingEditor(Editor* editor)
   m_firstFrameConn = Preferences::instance().document(m_document)
     .timeline.firstFrame.AfterChange.connect([this]{ invalidate(); });
 
+  m_onionskinConn = docPref.onionskin.AfterChange.connect([this]{ invalidate(); });
+
   setFocusStop(true);
   regenerateRows();
   setViewScroll(view->timelineScroll());
@@ -400,6 +403,7 @@ void Timeline::detachDocument()
     m_confPopup->closeWindow(nullptr);
 
   m_firstFrameConn.disconnect();
+  m_onionskinConn.disconnect();
 
   if (m_document) {
     m_thumbnailsPrefConn.disconnect();
@@ -778,7 +782,7 @@ bool Timeline::onProcessMessage(Message* msg)
           break;
         }
         case PART_ROW_TEXT: {
-          base::ScopedValue<bool> lock(m_fromTimeline, true, false);
+          base::ScopedValue lock(m_fromTimeline, true);
           const layer_t old_layer = getLayerIndex(m_layer);
           const bool selectLayer = (mouseMsg->left() || !isLayerActive(m_clk.layer));
           const bool selectLayerInCanvas =
@@ -913,7 +917,7 @@ bool Timeline::onProcessMessage(Message* msg)
           break;
 
         case PART_CEL: {
-          base::ScopedValue<bool> lock(m_fromTimeline, true, false);
+          base::ScopedValue lock(m_fromTimeline, true);
           const layer_t old_layer = getLayerIndex(m_layer);
           const bool selectCel = (mouseMsg->left()
             || !isLayerActive(m_clk.layer)
@@ -1681,8 +1685,8 @@ void Timeline::onPaint(ui::PaintEvent& ev)
       if (!clip)
         continue;
 
-      Layer* layerPtr = m_rows[layer].layer();
-      if (!layerPtr->isImage()) {
+      Layer* layerPtr = getLayer(layer);
+      if (!layerPtr || !layerPtr->isImage()) {
         // Draw empty cels
         for (frame=firstFrame; frame<=lastFrame; ++frame) {
           drawCel(g, layer, frame, nullptr, nullptr);
@@ -2073,11 +2077,10 @@ void Timeline::drawClipboardRange(ui::Graphics* g)
     &clipboard_document,
     &clipboard_range);
 
-  if (!m_document || clipboard_document != m_document)
+  if (!m_document ||
+      clipboard_document != m_document ||
+      !m_clipboard_timer.isRunning())
     return;
-
-  if (!m_clipboard_timer.isRunning())
-    m_clipboard_timer.start();
 
   IntersectClip clip(g, getRangeClipBounds(clipboard_range));
   if (clip) {
@@ -2163,9 +2166,10 @@ void Timeline::drawHeaderFrame(ui::Graphics* g, frame_t frame)
            is_active, is_hover, is_clicked);
 }
 
-void Timeline::drawLayer(ui::Graphics* g, int layerIdx)
+void Timeline::drawLayer(ui::Graphics* g, const int layerIdx)
 {
-  ASSERT(layerIdx >= 0 && layerIdx < int(m_rows.size()));
+  // It can happen when the m_rows is empty (e.g. the sprite doesn't
+  // have layers)
   if (layerIdx < 0 || layerIdx >= m_rows.size())
     return;
 
@@ -2304,10 +2308,12 @@ void Timeline::drawLayer(ui::Graphics* g, int layerIdx)
   }
 }
 
-void Timeline::drawCel(ui::Graphics* g, layer_t layerIndex, frame_t frame, Cel* cel, DrawCelData* data)
+void Timeline::drawCel(ui::Graphics* g,
+                       const layer_t layerIndex, const frame_t frame,
+                       const Cel* cel, const DrawCelData* data)
 {
   auto& styles = skinTheme()->styles;
-  Layer* layer = m_rows[layerIndex].layer();
+  Layer* layer = getLayer(layerIndex);
   Image* image = (cel ? cel->image(): nullptr);
   bool is_hover = (m_hot.part == PART_CEL &&
     m_hot.layer == layerIndex &&
@@ -2399,6 +2405,11 @@ void Timeline::drawCel(ui::Graphics* g, layer_t layerIndex, frame_t frame, Cel* 
   // Draw decorators to link the activeCel with its links.
   if (data && data->activeIt != data->end)
     drawCelLinkDecorators(g, full_bounds, cel, frame, is_loosely_active, is_hover, data);
+
+  // Draw 'z' if this cel has a custom z-index (non-zero)
+  if (cel && cel->zIndex() != 0) {
+    drawPart(g, bounds, nullptr, styles.timelineZindex(), is_loosely_active, is_hover);
+  }
 }
 
 void Timeline::updateCelOverlayBounds(const Hit& hit)
@@ -2485,8 +2496,9 @@ void Timeline::drawCelOverlay(ui::Graphics* g)
 }
 
 void Timeline::drawCelLinkDecorators(ui::Graphics* g, const gfx::Rect& bounds,
-                                     Cel* cel, frame_t frame, bool is_active, bool is_hover,
-                                     DrawCelData* data)
+                                     const Cel* cel, const frame_t frame,
+                                     const bool is_active, const bool is_hover,
+                                     const DrawCelData* data)
 {
   auto& styles = skinTheme()->styles;
   ObjectId imageId = (*data->activeIt)->image()->id();
@@ -3230,7 +3242,7 @@ void Timeline::updateScrollBars()
 void Timeline::updateByMousePos(ui::Message* msg, const gfx::Point& mousePos)
 {
   Hit hit = hitTest(msg, mousePos);
-  if (hasMouseOver())
+  if (hasMouse())
     setCursor(msg, hit);
   setHot(hit);
 }
@@ -3860,6 +3872,17 @@ bool Timeline::allLayersDiscontinuous()
   return true;
 }
 
+doc::Layer* Timeline::getLayer(int layerIndex) const
+{
+  if (layerIndex >= 0 && layerIndex < m_rows.size())
+    return m_rows[layerIndex].layer();
+  else {
+    // Only possible when m_rows is empty
+    ASSERT(m_rows.size() == 0);
+    return nullptr;
+  }
+}
+
 layer_t Timeline::getLayerIndex(const Layer* layer) const
 {
   for (int i=0; i<(int)m_rows.size(); i++)
@@ -3871,10 +3894,14 @@ layer_t Timeline::getLayerIndex(const Layer* layer) const
 
 bool Timeline::isLayerActive(const layer_t layerIndex) const
 {
-  if (layerIndex == getLayerIndex(m_layer))
+  Layer* layer = getLayer(layerIndex);
+  if (!layer)
+    return false;
+
+  if (layer == m_layer)
     return true;
   else
-    return m_range.contains(m_rows[layerIndex].layer());
+    return m_range.contains(layer);
 }
 
 bool Timeline::isFrameActive(const frame_t frame) const
@@ -3887,20 +3914,28 @@ bool Timeline::isFrameActive(const frame_t frame) const
 
 bool Timeline::isCelActive(const layer_t layerIdx, const frame_t frame) const
 {
+  Layer* layer = getLayer(layerIdx);
+  if (!layer)
+    return false;
+
   if (m_range.enabled())
-    return m_range.contains(m_rows[layerIdx].layer(), frame);
+    return m_range.contains(layer, frame);
   else
-    return (layerIdx == getLayerIndex(m_layer) &&
+    return (layer == m_layer &&
             frame == m_frame);
 }
 
 bool Timeline::isCelLooselyActive(const layer_t layerIdx, const frame_t frame) const
 {
+  Layer* layer = getLayer(layerIdx);
+  if (!layer)
+    return false;
+
   if (m_range.enabled())
-    return (m_range.contains(m_rows[layerIdx].layer()) ||
+    return (m_range.contains(layer) ||
             m_range.contains(frame));
   else
-    return (layerIdx == getLayerIndex(m_layer) ||
+    return (layer == m_layer ||
             frame == m_frame);
 }
 
@@ -4055,8 +4090,10 @@ void Timeline::updateDropRange(const gfx::Point& pt)
     case Range::kFrames:
     case Range::kLayers:
       m_dropRange.clearRange();
-      m_dropRange.startRange(m_rows[m_hot.layer].layer(), m_hot.frame, m_range.type());
-      m_dropRange.endRange(m_rows[m_hot.layer].layer(), m_hot.frame);
+      if (!m_rows.empty()) {
+        m_dropRange.startRange(m_rows[m_hot.layer].layer(), m_hot.frame, m_range.type());
+        m_dropRange.endRange(m_rows[m_hot.layer].layer(), m_hot.frame);
+      }
       break;
   }
 
@@ -4272,6 +4309,14 @@ bool Timeline::onPaste(Context* ctx)
 {
   auto clipboard = ctx->clipboard();
   if (clipboard->format() == ClipboardFormat::DocRange) {
+    // After a paste action, we just remove the marching ant
+    // (following paste commands will paste the same source range, but
+    // we just disable the marching ants effect).
+    if (m_clipboard_timer.isRunning()) {
+      m_clipboard_timer.stop();
+      m_redrawMarchingAntsOnly = false;
+      invalidate();
+    }
     clipboard->paste(ctx, true);
     return true;
   }
@@ -4455,7 +4500,7 @@ void Timeline::setLayerCollapsedFlag(const layer_t l, const bool state)
 
 int Timeline::separatorX() const
 {
-  return std::clamp(m_separator_x,
+  return std::clamp(m_separator_x * guiscale(),
                     headerBoxWidth(),
                     std::max(bounds().w-guiscale(),
                              headerBoxWidth()));
@@ -4463,7 +4508,7 @@ int Timeline::separatorX() const
 
 void Timeline::setSeparatorX(int newValue)
 {
-  m_separator_x = std::max(0, newValue);
+  m_separator_x = std::max(0, newValue) / guiscale();
 }
 
 //static

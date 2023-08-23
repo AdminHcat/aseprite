@@ -21,8 +21,6 @@
 #include "ui/message.h"
 #include "ui/widget.h"
 
-#include <thread>
-
 namespace app {
 
 using namespace ui;
@@ -32,10 +30,14 @@ FilterPreview::FilterPreview(FilterManagerImpl* filterMgr)
   : Widget(kGenericWidget)
   , m_filterMgr(filterMgr)
   , m_timer(1, this)
-  , m_filterThread(nullptr)
-  , m_filterIsDone(false)
+  , m_restartPreviewTimer(10)
 {
   setVisible(false);
+
+  m_restartPreviewTimer.Tick.connect([this]{
+    onDelayedStartPreview();
+    m_restartPreviewTimer.stop();
+  });
 }
 
 FilterPreview::~FilterPreview()
@@ -61,33 +63,59 @@ void FilterPreview::setEnablePreview(bool state)
 
 void FilterPreview::stop()
 {
+  // Cancel the token (so the filter processing stops immediately)
+  m_filterTask.cancel();
+
+  // Stop the filter and timer to flush changes to the screen.
   {
     std::scoped_lock lock(m_filterMgrMutex);
     if (m_timer.isRunning()) {
       ASSERT(m_filterMgr);
       m_filterMgr->end();
     }
+    m_timer.stop();
   }
 
-  m_timer.stop();
-
-  if (m_filterThread) {
-    m_filterThread->join();
-    m_filterThread.reset();
-  }
+  // Wait the filter task to end.
+  if (m_filterTask.running())
+    m_filterTask.wait();
 }
 
 void FilterPreview::restartPreview()
 {
   stop();
 
-  std::scoped_lock lock(m_filterMgrMutex);
+  // Start the timer to re-launch the filter preview in the next 10
+  // milliseconds. This is necessary to avoid restarting the preview
+  // immediately when a lot of mouse events are received at the same
+  // time, so we can group several events in one restart.
+  //
+  // E.g. this can happen when the user scrolls the preview or when
+  // changes a filter parameter (e.g. tolerance) and the operating
+  // system (e.g. Linux) creates a lot of mouse events/change filter
+  // param events.
+  m_restartPreviewTimer.start();
+}
 
+void FilterPreview::onDelayedStartPreview()
+{
+  // Start the filter for preview purposes and the timer to flush the
+  // preview to the editor/display.
   m_filterMgr->beginForPreview();
-  m_filterIsDone = false;
   m_timer.start();
-  m_filterThread.reset(
-    new std::thread([this]{ onFilterThread(); }));
+
+  if (!m_filterTask.running()) {
+    // Re-start the task to apply the filter step by step
+    m_filterTask.run([this](base::task_token& token) {
+      m_filterMgr->setTaskToken(token);
+      onFilterTask(token);
+    });
+  }
+  else {
+    // Is it possible to happen? We cancel the token, the task is
+    // still running, we don't launch it again, and we are here.
+    ASSERT(false);
+  }
 }
 
 bool FilterPreview::onProcessMessage(Message* msg)
@@ -112,7 +140,7 @@ bool FilterPreview::onProcessMessage(Message* msg)
       std::scoped_lock lock(m_filterMgrMutex);
       if (m_filterMgr) {
         m_filterMgr->flush();
-        if (m_filterIsDone)
+        if (m_filterTask.completed())
           m_timer.stop();
       }
       break;
@@ -123,14 +151,13 @@ bool FilterPreview::onProcessMessage(Message* msg)
 }
 
 // This is executed in other thread.
-void FilterPreview::onFilterThread()
+void FilterPreview::onFilterTask(base::task_token& token)
 {
-  bool running = true;
-  while (running) {
+  while (!token.canceled()) {
     {
       std::scoped_lock lock(m_filterMgrMutex);
-      m_filterIsDone = !m_filterMgr->applyStep();
-      running = (!m_filterIsDone && m_timer.isRunning());
+      if (!m_filterMgr->applyStep())
+        token.cancel();
     }
     base::this_thread::yield();
   }

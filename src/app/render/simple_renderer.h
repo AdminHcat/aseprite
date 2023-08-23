@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2022  Igara Studio S.A.
+// Copyright (C) 2022-2023  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -17,6 +17,10 @@ namespace app {
   // CPU-only.
   class SimpleRenderer : public Renderer {
   public:
+    SimpleRenderer();
+
+    const Properties& properties() const override { return m_properties; }
+
     void setRefLayersVisiblity(const bool visible) override;
     void setNonactiveLayersOpacity(const int opacity) override;
     void setNewBlendMethod(const bool newBlend) override;
@@ -41,14 +45,12 @@ namespace app {
     void setOnionskin(const render::OnionskinOptions& options) override;
     void disableOnionskin() override;
 
-    void renderSprite(doc::Image* dstImage,
-                      const doc::Sprite* sprite,
-                      const doc::frame_t frame) override;
-    void renderSprite(doc::Image* dstImage,
+    void renderSprite(os::Surface* dstSurface,
                       const doc::Sprite* sprite,
                       const doc::frame_t frame,
                       const gfx::ClipF& area) override;
-    void renderCheckeredBackground(doc::Image* dstImage,
+    void renderCheckeredBackground(os::Surface* dstSurface,
+                                   const doc::Sprite* sprite,
                                    const gfx::Clip& area) override;
     void renderImage(doc::Image* dstImage,
                      const doc::Image* srcImage,
@@ -58,6 +60,7 @@ namespace app {
                      const int opacity,
                      const doc::BlendMode blendMode) override;
   private:
+    Properties m_properties;
     render::Render m_render;
   };
 

@@ -1,5 +1,5 @@
 #! /bin/bash
-# Copyright (C) 2018-2021 Igara Studio S.A.
+# Copyright (C) 2018-2023 Igara Studio S.A.
 
 function list_files() {
     oldwd=$(pwd $PWDARG)
@@ -36,7 +36,6 @@ layer (fg) 2.png" "list_files $d"
 # --save-as {layer}
 
 d=$t/save-as-layer
-mkdir $d  # TODO why do we need this?
 $ASEPRITE -b sprites/1empty3.aseprite --save-as $d/layer-{layer}.gif || exit 1
 expect "layer-bg.gif
 layer-fg.gif" "list_files $d"
@@ -179,10 +178,9 @@ cd $oldwd
 
 if [[ "$(uname)" =~ "MINGW" ]] || [[ "$(uname)" =~ "MSYS" ]] ; then
     # Ignore this test on Windows because we cannot give * as a parameter (?)
-    echo Do nothing
+    echo Skip one -save-as test because Windows does not support using asterisk in arguments without listing files
 else
 d=$t/save-as-groups-and-hidden
-mkdir $d
 $ASEPRITE -b sprites/groups2.aseprite -layer \* -save-as "$d/g2-all.png" || exit 1
 $ASEPRITE -b sprites/groups2.aseprite -layer \* -ignore-layer items -save-as "$d/g2-all-without-items.png" || exit 1
 $ASEPRITE -b sprites/groups2.aseprite -layer \* -ignore-layer gun -save-as "$d/g2-all-without-gun1.png" || exit 1
@@ -276,3 +274,136 @@ expect "groups2-1.png
 groups3abc-1.png
 link-1.png
 link-2.png" "list_files $d"
+
+# Test regression with --save-as {tag}_1.png to interpret 1 as {frame1}
+# https://community.aseprite.org/t/17253
+
+d=$t/save-as-1-as-frame1-ok
+$ASEPRITE -b sprites/1empty3.aseprite \
+             -save-as "$d/{tag}-{frame1}.png" || exit 1
+expect "a-1.png
+a-2.png
+b-1.png" "list_files $d"
+
+d=$t/save-as-1-as-frame1-regression
+$ASEPRITE -b sprites/1empty3.aseprite \
+             -save-as "$d/{tag}-1.png" || exit 1
+expect "a-1.png
+a-2.png
+b-1.png" "list_files $d"
+
+# Test that -save-as {tag}.png will save with the frame number when needed
+
+d=$t/save-as-with-format-but-without-frame
+$ASEPRITE -b sprites/1empty3.aseprite \
+             -save-as "$d/{tag}.png" || exit 1
+expect "a1.png
+a2.png
+b.png" "list_files $d"
+
+# Test https://github.com/aseprite/aseprite/issues/3733#issuecomment-1489720933
+#      https://github.com/aseprite/aseprite/issues/3733#issuecomment-1494682407
+# Same as previous test, but with -filename-format with -split-tags
+
+d=$t/save-as-with-filename-format--and-split-tags-without-frame
+$ASEPRITE -b sprites/1empty3.aseprite \
+          -split-tags -filename-format "$d/{tag}.png" \
+          -save-as "$d/test.png"
+expect "a1.png
+a2.png
+b.png" "list_files $d"
+
+# Regression with -save-as {slice}
+# https://github.com/aseprite/aseprite/issues/3801
+
+d=$t/save-as-with-slice
+$ASEPRITE -b sprites/slices.aseprite -save-as $d/{slice}.png
+expect "line.png
+square.png" "list_files $d"
+
+# Test https://github.com/aseprite/aseprite/issues/3622
+# Test that -save-as -tag will save the right tag frames in webp file format
+
+d=$t/save-as-tag-webp
+$ASEPRITE -b -frame-tag "a" sprites/1empty3.aseprite -save-as $d/save-as-tag.webp || exit 1
+expect "save-as-tag.webp" "list_files $d"
+cat >$d/compare.lua <<EOF
+local a = app.open("sprites/1empty3.aseprite")
+app.command.FlattenLayers()
+local b = app.open("$d/save-as-tag.webp")
+-- Shrink frames:
+for f = 1,#b.frames do
+  local oldColor = b.layers[1]:cel(f).image:getPixel(0,0)
+  app.useTool{tool="pencil", points={Point(0,0)}, color=Color(255,0,0)}
+  app.useTool{tool='pencil', points={Point(0,0)}, color=oldColor}
+end
+local tagA = a.tags[1]
+assert(tagA.name == "a")
+assert(tagA.frames == #b.frames)
+local cleanImage = Image(b.spec)
+cleanImage:clear()
+for f = 1,#b.frames do
+  local celA = a.layers[1]:cel(f + tagA.fromFrame.frameNumber - 1)
+  local celB = b.layers[1]:cel(f)
+  if celA and celB then
+    assert(celA.image:isEqual(celB.image))
+  else
+    assert(not celA)
+    assert(not celB or celB.image:isEqual(cleanImage))
+  end
+end
+EOF
+$ASEPRITE -b -script "$d/compare.lua" || exit 1
+
+# Test -save-as selection to gif
+# https://github.com/aseprite/aseprite/issues/3827
+d=$t/save-selection-to-gif
+mkdir $d
+cat >$d/save.lua <<EOF
+local a = app.open("sprites/tags3.aseprite")
+assert(a.width == 4)
+assert(a.height == 4)
+app.command.SaveFileCopyAs{
+  filename="$d/output.gif",
+  bounds=Rectangle(1, 2, 3, 2)
+}
+local b = app.open("$d/output.gif")
+assert(b.width == 3)
+assert(b.height == 2)
+EOF
+"$ASEPRITE" -b -script "$d/save.lua" || exit 1
+
+# Saving moving slice
+d=$t/save-moving-slice
+$ASEPRITE -b sprites/slices-moving.aseprite -slice square -save-as $d/output.gif || exit 1
+$ASEPRITE -b sprites/slices-moving.aseprite -slice square -save-as $d/output.png || exit 1
+$ASEPRITE -b sprites/slices-moving.aseprite -scale 2 -slice square -save-as $d/scaled.gif || exit 1
+$ASEPRITE -b sprites/slices-moving.aseprite -scale 2 -slice square -save-as $d/scaled.png || exit 1
+cat >$d/compare.lua <<EOF
+local a = app.open("$d/output.gif")
+local b = app.open("$d/output1.png")
+app.command.OpenFile{ filename="$d/output1.png", oneframe=1 } local b1 = app.sprite
+app.command.OpenFile{ filename="$d/output2.png", oneframe=1 } local b2 = app.sprite
+app.command.OpenFile{ filename="$d/output3.png", oneframe=1 } local b3 = app.sprite
+app.command.OpenFile{ filename="$d/output4.png", oneframe=1 } local b4 = app.sprite
+assert(a.bounds == Rectangle(0, 0, 4, 2))
+assert(b.bounds == Rectangle(0, 0, 4, 2))
+assert(b1.bounds == Rectangle(0, 0, 2, 2))
+assert(b2.bounds == Rectangle(0, 0, 4, 2))
+assert(b3.bounds == Rectangle(0, 0, 3, 2))
+assert(b4.bounds == Rectangle(0, 0, 4, 2))
+
+local c = app.open("$d/scaled.gif")
+local d = app.open("$d/scaled1.png")
+app.command.OpenFile{ filename="$d/scaled1.png", oneframe=1 } local d1 = app.sprite
+app.command.OpenFile{ filename="$d/scaled2.png", oneframe=1 } local d2 = app.sprite
+app.command.OpenFile{ filename="$d/scaled3.png", oneframe=1 } local d3 = app.sprite
+app.command.OpenFile{ filename="$d/scaled4.png", oneframe=1 } local d4 = app.sprite
+assert(c.bounds == Rectangle(0, 0, 8, 4))
+assert(d.bounds == Rectangle(0, 0, 8, 4))
+assert(d1.bounds == Rectangle(0, 0, 4, 4))
+assert(d2.bounds == Rectangle(0, 0, 8, 4))
+assert(d3.bounds == Rectangle(0, 0, 6, 4))
+assert(d4.bounds == Rectangle(0, 0, 8, 4))
+EOF
+$ASEPRITE -b -script "$d/compare.lua" || exit 1

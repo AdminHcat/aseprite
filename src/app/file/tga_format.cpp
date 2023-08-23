@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2022  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -165,16 +165,17 @@ bool TgaFormat::onLoad(FileOp* fop)
   if (decoder.hasAlpha())
     fop->sequenceSetHasAlpha(true);
 
-  ImageRef image = fop->sequenceImage((doc::PixelFormat)spec.colorMode(),
-                                      spec.width(),
-                                      spec.height());
+  ImageRef image = fop->sequenceImageToLoad(
+    (doc::PixelFormat)spec.colorMode(),
+    spec.width(),
+    spec.height());
   if (!image)
     return false;
 
   tga::Image tgaImage;
   tgaImage.pixels = image->getPixelAddress(0, 0);
-  tgaImage.rowstride = image->getRowStrideSize();
-  tgaImage.bytesPerPixel = image->getRowStrideSize(1);
+  tgaImage.rowstride = image->rowBytes();
+  tgaImage.bytesPerPixel = image->bytesPerPixel();
 
   // Read image
   TgaDelegate delegate(fop);
@@ -288,7 +289,7 @@ void prepare_header(tga::Header& header,
 
 bool TgaFormat::onSave(FileOp* fop)
 {
-  const FileAbstractImage* img = fop->abstractImage();
+  const FileAbstractImage* img = fop->abstractImageToSave();
   const Palette* palette = fop->sequenceGetPalette();
 
   FileHandle handle(open_file_with_exception_sync_on_close(fop->filename(), "wb"));
@@ -311,8 +312,8 @@ bool TgaFormat::onSave(FileOp* fop)
   doc::ImageRef image = img->getScaledImage();
   tga::Image tgaImage;
   tgaImage.pixels = image->getPixelAddress(0, 0);
-  tgaImage.rowstride = image->getRowStrideSize();
-  tgaImage.bytesPerPixel = image->getRowStrideSize(1);
+  tgaImage.rowstride = image->rowBytes();
+  tgaImage.bytesPerPixel = image->bytesPerPixel();
 
   TgaDelegate delegate(fop);
   encoder.writeImage(header, tgaImage);

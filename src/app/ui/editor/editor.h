@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2022  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -90,15 +90,13 @@ namespace app {
       kShowDecorators = 16,
       kShowSymmetryLine = 32,
       kShowSlices = 64,
-      kUseNonactiveLayersOpacityWhenEnabled = 128,
       kDefaultEditorFlags = (kShowGrid |
                              kShowMask |
                              kShowOnionskin |
                              kShowOutside |
                              kShowDecorators |
                              kShowSymmetryLine |
-                             kShowSlices |
-                             kUseNonactiveLayersOpacityWhenEnabled)
+                             kShowSlices)
     };
 
     enum class ZoomBehavior {
@@ -282,10 +280,7 @@ namespace app {
     bool isPlaying() const;
 
     // Shows a popup menu to change the editor animation speed.
-    void showAnimationSpeedMultiplierPopup(Option<bool>& playOnce,
-                                           Option<bool>& playAll,
-                                           Option<bool>& playSubtags,
-                                           const bool withStopBehaviorOptions);
+    void showAnimationSpeedMultiplierPopup();
     double getAnimationSpeedMultiplier() const;
     void setAnimationSpeedMultiplier(double speed);
 
@@ -401,6 +396,8 @@ namespace app {
     void invalidateIfActive();
     void updateAutoCelGuides(ui::Message* msg);
 
+    int otherLayersOpacity() const;
+
     // Stack of states. The top element in the stack is the current state (m_state).
     EditorStatesHistory m_statesHistory;
     EditorStatesHistory m_deletedStates;
@@ -453,6 +450,10 @@ namespace app {
 
     DocView* m_docView;
 
+    // Last known mouse position received by this editor when the
+    // mouse button was pressed. Used for auto-scrolling. To get the
+    // current mouse position on the editor you can use
+    // ui::Display::lastMousePos().
     gfx::Point m_oldPos;
 
     EditorFlags m_flags;

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2019-2022  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -212,10 +212,11 @@ Cel* create_cel_copy(CmdSequence* cmds,
   }
 
   // New cel
-  std::unique_ptr<Cel> dstCel(
-    new Cel(dstFrame, ImageRef(Image::create(dstPixelFormat, dstSize.w, dstSize.h))));
+  auto dstCel = std::make_unique<Cel>(
+    dstFrame, ImageRef(Image::create(dstPixelFormat, dstSize.w, dstSize.h)));
 
   dstCel->setOpacity(srcCel->opacity());
+  dstCel->setZIndex(srcCel->zIndex());
   dstCel->data()->setUserData(srcCel->data()->userData());
 
   // Special case were we copy from a tilemap...
@@ -375,6 +376,7 @@ void draw_image_into_new_tilemap_cel(
 {
   ASSERT(dstLayer->isTilemap());
 
+  auto doc = static_cast<Doc*>(dstLayer->sprite()->document());
   doc::Tileset* tileset = dstLayer->tileset();
   doc::Grid grid = tileset->grid();
   grid.origin(gridOrigin);
@@ -415,14 +417,15 @@ void draw_image_into_new_tilemap_cel(
         cmds->executeAndAdd(addTile);
       else {
         // TODO a little hacky
-        addTile->execute(
-          static_cast<Doc*>(dstLayer->sprite()->document())->context());
+        addTile->execute(doc->context());
       }
 
       tileIndex = addTile->tileIndex();
 
       if (!cmds)
         delete addTile;
+
+      doc->notifyAfterAddTile(dstLayer, dstCel->frame(), tileIndex);
     }
 
     // We were using newTilemap->putPixel() directly but received a
@@ -436,8 +439,7 @@ void draw_image_into_new_tilemap_cel(
     }
   }
 
-  static_cast<Doc*>(dstLayer->sprite()->document())
-    ->notifyTilesetChanged(tileset);
+  doc->notifyTilesetChanged(tileset);
 
   dstCel->data()->setImage(newTilemap, dstLayer);
   dstCel->setPosition(grid.tileToCanvas(tilemapBounds.origin()));

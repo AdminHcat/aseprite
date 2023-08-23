@@ -5,7 +5,8 @@
 3. [Header](#header)
 4. [Frames](#frames)
 5. [Chunk Types](#chunk-types)
-6. [File Format Changes](#file-format-changes)
+6. [Notes](#notes)
+7. [File Format Changes](#file-format-changes)
 
 ## References
 
@@ -42,6 +43,7 @@ ASE files use Intel (little-endian) byte order.
 * `TILE`: **Tilemaps**: Each tile can be a 8-bit (`BYTE`), 16-bit
   (`WORD`), or 32-bit (`DWORD`) value and there are masks related to
   the meaning of each bit.
+* `UUID`: A Universally Unique Identifier stored as `BYTE[16]`.
 
 ## Introduction
 
@@ -210,7 +212,11 @@ This chunk determine where to put a cel in the specified layer/frame.
                 1 - Linked Cel
                 2 - Compressed Image
                 3 - Compressed Tilemap
-    BYTE[7]     For future (set to zero)
+    SHORT       Z-Index (see NOTE.5)
+                0 = default layer ordering
+                +N = show this cel N layers later
+                -N = show this cel N layers back
+    BYTE[5]     For future (set to zero)
     + For cel type = 0 (Raw Image Data)
       WORD      Width in pixels
       WORD      Height in pixels
@@ -221,7 +227,7 @@ This chunk determine where to put a cel in the specified layer/frame.
     + For cel type = 2 (Compressed Image)
       WORD      Width in pixels
       WORD      Height in pixels
-      BYTE[]    "Raw Cel" data compressed with ZLIB method (see NOTE.3)
+      PIXEL[]   "Raw Cel" data compressed with ZLIB method (see NOTE.3)
     + For cel type = 3 (Compressed Tilemap)
       WORD      Width in number of tiles
       WORD      Height in number of tiles
@@ -441,6 +447,8 @@ The data of this chunk is as follows:
             DWORD     Number of properties
             BYTE[]    Nested properties data
                       Structure is the same as indicated in this loop
+          + If type==0x0013
+            UUID
 
 ### Slice Chunk (0x2022)
 
@@ -497,9 +505,9 @@ The data of this chunk is as follows:
       PIXEL[]   Compressed Tileset image (see NOTE.3):
                   (Tile Width) x (Tile Height x Number of Tiles)
 
-### Notes
+## Notes
 
-#### NOTE.1
+### NOTE.1
 
 The child level is used to show the relationship of this layer with
 the last one read, for example:
@@ -513,7 +521,7 @@ the last one read, for example:
       |  `- Layer2                2
       `- Layer3                   1
 
-#### NOTE.2
+### NOTE.2
 
 The layer index is a number to identify a layer in the sprite. Layers
 are numbered in the same order as Layer Chunks (0x2004) appear in the
@@ -531,16 +539,29 @@ file, for example:
 It means that in the file you will find the `Background` layer chunk
 first, then the `Layer1` layer chunk, etc.
 
-#### NOTE.3
+### NOTE.3
 
-Details about the ZLIB and DEFLATE compression methods:
+**Uncompressed Image**: Uncompressed ("raw") images inside `.aseprite`
+files are saved row by row from top to bottom, and for each
+row/scanline, pixels are from left to right. Each pixel is a `PIXEL`
+(or a `TILE` in the case of tilemaps) as defined in the
+[References](#references) section (so the number and order of bytes
+depends on the color mode of the image/sprite, or the tile
+format). Generally you'll not find uncompressed images in `.aseprite`
+files (only in very old `.aseprite` files).
+
+**Compressed Image**: When an image is compressed (the regular case
+that you will find in `.aseprite` files), the data is a stream of
+bytes in exactly the same *"Uncompressed Image"* format as described
+above, but compressed using the ZLIB method. Details about the ZLIB
+and DEFLATE compression methods can be found here:
 
 * https://www.ietf.org/rfc/rfc1950
 * https://www.ietf.org/rfc/rfc1951
 * Some extra notes that might help you to decode the data:
   http://george.chiramattel.com/blog/2007/09/deflatestream-block-length-does-not-match.html
 
-#### NOTE.4
+### NOTE.4
 
 The extension ID must be a string like `publisher/ExtensionName`, for
 example, the [Aseprite Attachment System](https://github.com/aseprite/Attachment-System)
@@ -548,6 +569,37 @@ uses `aseprite/Attachment-System`.
 
 This string will be used in a future to automatically link to the
 extension URL in the [Aseprite Store](https://github.com/aseprite/aseprite/issues/1928).
+
+### NOTE.5
+
+In case that you read and render an `.aseprite` file in your game
+engine/software, you are going to need to process the z-index field
+for each cel with a specific algorithm. This is a possible C++ code
+about how to order layers for a specific frame (the `zIndex` must be
+set depending on the active frame/cel):
+
+```c++
+struct Layer {
+  int layerIndex; // See the "layer index" in NOTE.2
+  int zIndex;     // The z-index value for a specific cel in this layer/frame
+
+  int order() const {
+    return layerIndex + zIndex;
+  }
+
+  // Function to order with std::sort() by operator<(),
+  // which establish the render order from back to front.
+  bool operator<(const Layer& b) const {
+    return (order() < b.order()) ||
+           (order() == b.order() && (zIndex < b.zIndex));
+  }
+};
+```
+
+Basically we first compare `layerIndex + zIndex` of each cel, and then
+if this value is the same, we compare the specific `zIndex` value to
+disambiguate some scenarios. An example of this implementation can be
+found in the [RenderPlan code](https://github.com/aseprite/aseprite/blob/8e91d22b704d6d1e95e1482544318cee9f166c4d/src/doc/render_plan.cpp#L77).
 
 ## File Format Changes
 

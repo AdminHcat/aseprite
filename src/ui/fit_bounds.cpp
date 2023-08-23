@@ -1,5 +1,5 @@
 // Aseprite UI Library
-// Copyright (C) 2019-2022  Igara Studio S.A.
+// Copyright (C) 2019-2023  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -128,11 +128,12 @@ void fit_bounds(const Display* parentDisplay,
     if (fitLogic)
       fitLogic(workarea, frame, [](Widget* widget){ return widget->boundsOnScreen(); });
 
-    frame.x = std::clamp(frame.x, workarea.x, workarea.x2() - frame.w);
-    frame.y = std::clamp(frame.y, workarea.y, workarea.y2() - frame.h);
+    frame.x = std::clamp(frame.x, workarea.x, std::max(workarea.x, workarea.x2() - frame.w));
+    frame.y = std::clamp(frame.y, workarea.y, std::max(workarea.y, workarea.y2() - frame.h));
 
     // Set frame bounds directly
-    window->setBounds(gfx::Rect(0, 0, frame.w / scale, frame.h / scale));
+    pos = nativeWindow->pointFromScreen(frame.origin());
+    window->setBounds(gfx::Rect(pos.x, pos.y, frame.w / scale, frame.h / scale));
     window->loadNativeFrame(frame);
 
     if (window->isVisible()) {
@@ -147,8 +148,8 @@ void fit_bounds(const Display* parentDisplay,
     if (fitLogic)
       fitLogic(displayBounds, frame, [](Widget* widget){ return widget->bounds(); });
 
-    frame.x = std::clamp(frame.x, 0, displayBounds.w - frame.w);
-    frame.y = std::clamp(frame.y, 0, displayBounds.h - frame.h);
+    frame.x = std::clamp(frame.x, 0, std::max(0, displayBounds.w - frame.w));
+    frame.y = std::clamp(frame.y, 0, std::max(0, displayBounds.h - frame.h));
 
     window->setBounds(frame);
   }

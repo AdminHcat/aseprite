@@ -1068,6 +1068,13 @@ void DocExporter::captureSamples(Samples& samples,
           alreadyTrimmed = true;
         }
       }
+      // If "Ignore Empty" is checked and the item is a tile...
+      else if (m_ignoreEmptyCels && item.isOneImageOnly()) {
+        // Skip empty tile
+        if (is_empty_image(item.image.get()))
+          continue;
+      }
+
       if (!alreadyTrimmed && m_trimSprite)
         sample.setTrimmedBounds(spriteBounds);
 
@@ -1518,7 +1525,8 @@ void DocExporter::createDataFile(const Samples& samples,
       layer->getCels(cels);
       bool someCelWithData = false;
       for (const Cel* cel : cels) {
-        if (!cel->data()->userData().isEmpty()) {
+        if (cel->zIndex() != 0 ||
+            !cel->data()->userData().isEmpty()) {
           someCelWithData = true;
           break;
         }
@@ -1529,15 +1537,21 @@ void DocExporter::createDataFile(const Samples& samples,
 
         os << ", \"cels\": [";
         for (const Cel* cel : cels) {
-          if (!cel->data()->userData().isEmpty()) {
+          if (cel->zIndex() != 0 ||
+              !cel->data()->userData().isEmpty()) {
             if (firstCel)
               firstCel = false;
             else
               os << ", ";
 
-            os << "{ \"frame\": " << cel->frame()
-               << cel->data()->userData()
-               << " }";
+            os << "{ \"frame\": " << cel->frame();
+            if (cel->zIndex() != 0) {
+              os << ", \"zIndex\": " << cel->zIndex();
+            }
+            if (!cel->data()->userData().isEmpty()) {
+              os << cel->data()->userData();
+            }
+            os << " }";
           }
         }
         os << "]";

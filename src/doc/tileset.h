@@ -33,6 +33,7 @@ namespace doc {
            const UserData& data) : image(image), data(data) { }
     };
     static UserData kNoUserData;
+
   public:
     typedef std::vector<Tile> Tiles;
     typedef Tiles::iterator iterator;
@@ -130,6 +131,9 @@ namespace doc {
     // Called when the mask color of the sprite is modified, so we
     // have to regenerate the empty tile with that new mask color.
     void notifyRegenerateEmptyTile();
+
+    // Returns the number of tilemap layers that are referencing this tileset.
+    int tilemapsCount() const;
 
 #ifdef _DEBUG
     void assertValidHashTable();

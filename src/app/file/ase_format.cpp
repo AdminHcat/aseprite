@@ -54,6 +54,10 @@ public:
     m_fop->setError(msg.c_str());
   }
 
+  void incompatibilityError(const std::string& msg) override {
+    m_fop->setIncompatibilityError(msg);
+  }
+
   void progress(double fromZeroToOne) override {
     m_fop->setProgress(fromZeroToOne);
   }
@@ -80,7 +84,7 @@ public:
 
   doc::Sprite* sprite() { return m_sprite; }
 
-  bool cacheCompressedTilesets() const {
+  bool cacheCompressedTilesets() const override {
     return m_fop->config().cacheCompressedTilesets;
   }
 
@@ -106,9 +110,7 @@ public:
                      m_image->height());
   }
   int getScanlineSize() const override {
-    return doc::calculate_rowstride_bytes(
-      m_image->pixelFormat(),
-      m_image->width());
+    return m_image->widthBytes();
   }
   const uint8_t* getScanlineAddress(int y) const override {
     return m_image->getPixelAddress(0, y);
@@ -124,9 +126,8 @@ public:
                      m_tileset->grid().tileSize().h * m_tileset->size());
   }
   int getScanlineSize() const override {
-    return doc::calculate_rowstride_bytes(
-      m_tileset->sprite()->pixelFormat(),
-      m_tileset->grid().tileSize().w);
+    return bytes_per_pixel_for_colormode(m_tileset->sprite()->colorMode())
+      * m_tileset->grid().tileSize().w;
   }
   const uint8_t* getScanlineAddress(int y) const override {
     const int h = m_tileset->grid().tileSize().h;
@@ -986,7 +987,8 @@ static void ase_file_write_cel_chunk(FILE* f, dio::AsepriteFrameHeader* frame_he
   fputw(cel->y(), f);
   fputc(cel->opacity(), f);
   fputw(cel_type, f);
-  ase_file_write_padding(f, 7);
+  fputw(cel->zIndex(), f);
+  ase_file_write_padding(f, 5);
 
   switch (cel_type) {
 
@@ -1606,6 +1608,13 @@ static void ase_file_write_property_value(FILE* f,
         fputw(v.type(), f);
 
         ase_file_write_property_value(f, v);
+      }
+      break;
+    }
+    case USER_DATA_PROPERTY_TYPE_UUID: {
+      auto& uuid = *std::get_if<base::Uuid>(&value);
+      for (int i=0; i<16; ++i) {
+        fputc(uuid[i], f);
       }
       break;
     }

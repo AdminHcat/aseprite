@@ -11,9 +11,14 @@
 #include "app/script/values.h"
 
 #include "app/pref/preferences.h"
+#include "app/script/docobj.h"
 #include "app/script/engine.h"
 #include "app/script/luacpp.h"
+#include "app/tools/dynamics.h"
+#include "doc/frame.h"
+#include "doc/layer.h"
 #include "doc/remap.h"
+#include "doc/sprite.h"
 
 #include <any>
 #include <cstddef>
@@ -143,6 +148,19 @@ void push_value_to_lua(lua_State* L, const doc::Remap& value) {
 }
 
 // ----------------------------------------------------------------------
+// app::Params
+
+template<>
+void push_value_to_lua(lua_State* L, const Params& params) {
+  lua_newtable(L);
+  for (const auto& param : params) {
+    lua_pushstring(L, param.first.c_str());
+    lua_pushstring(L, param.second.c_str());
+    lua_rawset(L, -3);
+  }
+}
+
+// ----------------------------------------------------------------------
 // std::any
 
 template<>
@@ -153,12 +171,27 @@ void push_value_to_lua(lua_State* L, const std::any& value) {
     push_value_to_lua(L, *v);
   else if (auto v = std::any_cast<int>(&value))
     push_value_to_lua(L, *v);
+  // TODO "doc::frame_t" type matches "int", we could add a doc::Frame()
+  //      kind of object in the future
+  //else if (auto v = std::any_cast<doc::frame_t>(&value))
+  //  push_sprite_frame(L, nullptr, *v);
+  else if (auto v = std::any_cast<doc::tile_index>(&value))
+    push_value_to_lua(L, *v);
   else if (auto v = std::any_cast<std::string>(&value))
     push_value_to_lua(L, *v);
+  else if (auto v = std::any_cast<lua_CFunction>(&value))
+    lua_pushcfunction(L, *v);
   else if (auto v = std::any_cast<const doc::Remap*>(&value))
     push_value_to_lua(L, **v);
-  else if (auto v = std::any_cast<const doc::Tileset*>(&value))
+  else if (auto v = std::any_cast<doc::Tileset*>(&value))
     push_tileset(L, *v);
+  else if (auto v = std::any_cast<doc::Sprite*>(&value))
+    push_docobj(L, *v);
+  else if (auto v = std::any_cast<doc::Layer*>(&value))
+    push_docobj(L, *v);
+  else if (auto v = std::any_cast<const Params>(&value)) {
+    push_value_to_lua(L, *v);
+  }
   else {
     ASSERT(false);
     throw std::runtime_error("Cannot convert type inside std::any");
@@ -218,6 +251,19 @@ gfx::Rect get_value_from_lua(lua_State* L, int index) {
 }
 
 // ----------------------------------------------------------------------
+// Uuid
+
+template<>
+void push_value_to_lua(lua_State* L, const base::Uuid& value) {
+  push_obj(L, value);
+}
+
+template<>
+base::Uuid get_value_from_lua(lua_State* L, int index) {
+  return convert_args_into_uuid(L, index);
+}
+
+// ----------------------------------------------------------------------
 // tools::InkType
 
 template<>
@@ -267,6 +313,7 @@ FOR_ENUM(app::CelsTarget)
 FOR_ENUM(app::ColorBar::ColorSelector)
 FOR_ENUM(app::SpriteSheetDataFormat)
 FOR_ENUM(app::SpriteSheetType)
+FOR_ENUM(app::TilesetMode)
 FOR_ENUM(app::gen::BgType)
 FOR_ENUM(app::gen::BrushPreview)
 FOR_ENUM(app::gen::BrushType)
@@ -287,6 +334,8 @@ FOR_ENUM(app::gen::SymmetryMode)
 FOR_ENUM(app::gen::TimelinePosition)
 FOR_ENUM(app::gen::ToGrayAlgorithm)
 FOR_ENUM(app::gen::WindowColorProfile)
+FOR_ENUM(app::tools::ColorFromTo)
+FOR_ENUM(app::tools::DynamicSensor)
 FOR_ENUM(app::tools::FreehandAlgorithm)
 FOR_ENUM(app::tools::RotationAlgorithm)
 FOR_ENUM(doc::AniDir)
@@ -372,6 +421,9 @@ void push_value_to_lua(lua_State* L, const doc::UserData::Variant& value)
     case USER_DATA_PROPERTY_TYPE_PROPERTIES:
       push_value_to_lua(L, *std::get_if<doc::UserData::Properties>(&value));
       break;
+    case USER_DATA_PROPERTY_TYPE_UUID:
+      push_value_to_lua(L, *std::get_if<base::Uuid>(&value));
+      break;
   }
 #else // TODO enable this in the future
   std::visit([L](auto&& v){ push_value_to_lua(L, v); }, value);
@@ -395,8 +447,21 @@ doc::UserData::Variant get_value_from_lua(lua_State* L, int index)
       break;
 
     case LUA_TNUMBER:
-      if (lua_isinteger(L, index))
-        v = lua_tointeger(L, index);
+      if (lua_isinteger(L, index)) {
+        // This is required because some compilers/stdc++ impls
+        // (clang-10 + libstdc++ 7.5.0) don't convert "long long" type
+        // to "int64_t" automatically (?)
+        if constexpr (sizeof(lua_Integer) == 8) {
+          v = (int64_t)lua_tointeger(L, index);
+        }
+        else if constexpr (sizeof(lua_Integer) == 4) {
+          v = (int32_t)lua_tointeger(L, index);
+        }
+        else {
+          static_assert((sizeof(lua_Integer) == 8 ||
+                         sizeof(lua_Integer) == 4), "Invalid lua_Integer size");
+        }
+      }
       else {
         v = lua_tonumber(L, index);
       }
@@ -406,37 +471,14 @@ doc::UserData::Variant get_value_from_lua(lua_State* L, int index)
       v = std::string(lua_tostring(L, index));
       break;
 
-    case LUA_TTABLE: {
-      int i = 0;
-      bool isArray = true;
-      if (index < 0)
-        --index;
-      lua_pushnil(L);
-      while (lua_next(L, index) != 0) {
-        if (lua_isinteger(L, -2)) {
-          if (++i != lua_tointeger(L, -2)) {
-            isArray = false;
-            lua_pop(L, 2);  // Pop value and key
-            break;
-          }
-        }
-        else {
-          isArray = false;
-          lua_pop(L, 2);
-          break;
-        }
-        lua_pop(L, 1); // Pop the value, leave the key for lua_next()
-      }
-      if (index < 0)
-        ++index;
-      if (isArray) {
+    case LUA_TTABLE:
+      if (is_array_table(L, index)) {
         v = get_value_from_lua<doc::UserData::Vector>(L, index);
       }
       else {
         v = get_value_from_lua<doc::UserData::Properties>(L, index);
       }
       break;
-    }
 
     case LUA_TUSERDATA: {
       if (auto rect = may_get_obj<gfx::Rect>(L, index)) {
@@ -447,6 +489,9 @@ doc::UserData::Variant get_value_from_lua(lua_State* L, int index)
       }
       else if (auto sz = may_get_obj<gfx::Size>(L, index)) {
         v = *sz;
+      }
+      else if (auto uuid = may_get_obj<base::Uuid>(L, index)) {
+        v = *uuid;
       }
       break;
     }
@@ -513,6 +558,29 @@ doc::UserData::Vector get_value_from_lua(lua_State* L, int index)
   }
 
   return v;
+}
+
+bool is_array_table(lua_State* L, int index)
+{
+  if (index < 0)
+    --index;
+
+  int i = 0;
+  lua_pushnil(L);
+  while (lua_next(L, index) != 0) {
+    if (lua_isinteger(L, -2)) {
+      if (++i != lua_tointeger(L, -2)) {
+        lua_pop(L, 2);  // Pop value and key
+        return false;
+      }
+    }
+    else {
+      lua_pop(L, 2);
+      return false;
+    }
+    lua_pop(L, 1); // Pop the value, leave the key for lua_next()
+  }
+  return true;
 }
 
 } // namespace script

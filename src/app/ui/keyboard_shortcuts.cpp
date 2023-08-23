@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2022  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -23,6 +23,7 @@
 #include "app/tools/tool.h"
 #include "app/tools/tool_box.h"
 #include "app/ui/key.h"
+#include "app/ui/timeline/timeline.h"
 #include "app/ui_context.h"
 #include "app/xml_document.h"
 #include "app/xml_exception.h"
@@ -90,6 +91,7 @@ namespace {
     { "MoveTool"             , app::KeyContext::MoveTool },
     { "FreehandTool"         , app::KeyContext::FreehandTool },
     { "ShapeTool"            , app::KeyContext::ShapeTool },
+    { "FramesSelection"      , app::KeyContext::FramesSelection },
     { NULL                   , app::KeyContext::Any }
   };
 
@@ -433,7 +435,8 @@ void Key::add(const ui::Accelerator& accel,
 }
 
 const ui::Accelerator* Key::isPressed(const Message* msg,
-                                      KeyboardShortcuts& globalKeys) const
+                                      const KeyboardShortcuts& globalKeys,
+                                      const KeyContext keyContext) const
 {
   if (auto keyMsg = dynamic_cast<const KeyMessage*>(msg)) {
     for (const Accelerator& accel : accels()) {
@@ -441,7 +444,7 @@ const ui::Accelerator* Key::isPressed(const Message* msg,
                           keyMsg->scancode(),
                           keyMsg->unicodeChar()) &&
           (m_keycontext == KeyContext::Any ||
-           m_keycontext == globalKeys.getCurrentKeyContext())) {
+           m_keycontext == keyContext)) {
         return &accel;
       }
     }
@@ -459,6 +462,14 @@ const ui::Accelerator* Key::isPressed(const Message* msg,
     }
   }
   return nullptr;
+}
+
+const ui::Accelerator* Key::isPressed(const Message* msg,
+                                      const KeyboardShortcuts& globalKeys) const
+{
+  return isPressed(msg,
+                   globalKeys,
+                   globalKeys.getCurrentKeyContext());
 }
 
 bool Key::isPressed() const
@@ -950,7 +961,9 @@ void KeyboardShortcuts::reset()
     key->reset();
 }
 
-KeyPtr KeyboardShortcuts::command(const char* commandName, const Params& params, KeyContext keyContext)
+KeyPtr KeyboardShortcuts::command(const char* commandName,
+                                  const Params& params,
+                                  const KeyContext keyContext) const
 {
   Command* command = Commands::instance()->byId(commandName);
   if (!command)
@@ -970,7 +983,7 @@ KeyPtr KeyboardShortcuts::command(const char* commandName, const Params& params,
   return key;
 }
 
-KeyPtr KeyboardShortcuts::tool(tools::Tool* tool)
+KeyPtr KeyboardShortcuts::tool(tools::Tool* tool) const
 {
   for (KeyPtr& key : m_keys) {
     if (key->type() == KeyType::Tool &&
@@ -984,7 +997,7 @@ KeyPtr KeyboardShortcuts::tool(tools::Tool* tool)
   return key;
 }
 
-KeyPtr KeyboardShortcuts::quicktool(tools::Tool* tool)
+KeyPtr KeyboardShortcuts::quicktool(tools::Tool* tool) const
 {
   for (KeyPtr& key : m_keys) {
     if (key->type() == KeyType::Quicktool &&
@@ -998,8 +1011,8 @@ KeyPtr KeyboardShortcuts::quicktool(tools::Tool* tool)
   return key;
 }
 
-KeyPtr KeyboardShortcuts::action(KeyAction action,
-                                 KeyContext keyContext)
+KeyPtr KeyboardShortcuts::action(const KeyAction action,
+                                 const KeyContext keyContext) const
 {
   for (KeyPtr& key : m_keys) {
     if (key->type() == KeyType::Action &&
@@ -1014,7 +1027,7 @@ KeyPtr KeyboardShortcuts::action(KeyAction action,
   return key;
 }
 
-KeyPtr KeyboardShortcuts::wheelAction(WheelAction wheelAction)
+KeyPtr KeyboardShortcuts::wheelAction(const WheelAction wheelAction) const
 {
   for (KeyPtr& key : m_keys) {
     if (key->type() == KeyType::WheelAction &&
@@ -1028,7 +1041,7 @@ KeyPtr KeyboardShortcuts::wheelAction(WheelAction wheelAction)
   return key;
 }
 
-KeyPtr KeyboardShortcuts::dragAction(WheelAction dragAction)
+KeyPtr KeyboardShortcuts::dragAction(const WheelAction dragAction) const
 {
   for (KeyPtr& key : m_keys) {
     if (key->type() == KeyType::DragAction &&
@@ -1065,7 +1078,7 @@ void KeyboardShortcuts::disableAccel(const ui::Accelerator& accel,
   }
 }
 
-KeyContext KeyboardShortcuts::getCurrentKeyContext()
+KeyContext KeyboardShortcuts::getCurrentKeyContext() const
 {
   Doc* doc = UIContext::instance()->activeDocument();
   if (doc &&
@@ -1081,20 +1094,36 @@ KeyContext KeyboardShortcuts::getCurrentKeyContext()
       // eyedropper, but we want to use alt+left and alt+right in the
       // original context (the selection tool).
       App::instance()->activeToolManager()
-        ->selectedTool()->getInk(0)->isSelection())
+        ->selectedTool()->getInk(0)->isSelection()) {
     return KeyContext::SelectionTool;
-  else
-    return KeyContext::Normal;
+  }
+
+  auto timeline = App::instance()->timeline();
+  if (doc && timeline &&
+      !timeline->selectedFrames().empty() &&
+      (timeline->range().type() == DocRange::kFrames ||
+       timeline->range().type() == DocRange::kCels)) {
+    return KeyContext::FramesSelection;
+  }
+
+  return KeyContext::Normal;
 }
 
 bool KeyboardShortcuts::getCommandFromKeyMessage(const Message* msg, Command** command, Params* params)
 {
-  for (KeyPtr& key : m_keys) {
-    if (key->type() == KeyType::Command &&
-        key->isPressed(msg, *this)) {
-      if (command) *command = key->command();
-      if (params) *params = key->params();
-      return true;
+  const KeyContext contexts[] = {
+    getCurrentKeyContext(),
+    KeyContext::Normal
+  };
+  int n = (contexts[0] != contexts[1] ? 2: 1);
+  for (int i = 0; i < n; ++i) {
+    for (KeyPtr& key : m_keys) {
+      if (key->type() == KeyType::Command &&
+          key->isPressed(msg, *this, contexts[i])) {
+        if (command) *command = key->command();
+        if (params) *params = key->params();
+        return true;
+      }
     }
   }
   return false;
@@ -1338,6 +1367,8 @@ std::string convertKeyContextToUserFriendlyString(KeyContext keyContext)
       return I18N_KEY(key_context_freehand_tool);
     case KeyContext::ShapeTool:
       return I18N_KEY(key_context_shape_tool);
+    case KeyContext::FramesSelection:
+      return I18N_KEY(key_context_frames_selection);
   }
   return std::string();
 }

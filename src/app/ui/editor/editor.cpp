@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2022  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -12,6 +12,7 @@
 #include "app/ui/editor/editor.h"
 
 #include "app/app.h"
+#include "app/app_menus.h"
 #include "app/color.h"
 #include "app/color_picker.h"
 #include "app/color_utils.h"
@@ -34,6 +35,7 @@
 #include "app/tools/tool_box.h"
 #include "app/ui/color_bar.h"
 #include "app/ui/context_bar.h"
+#include "app/ui/doc_view.h"
 #include "app/ui/editor/drawing_state.h"
 #include "app/ui/editor/editor_customization_delegate.h"
 #include "app/ui/editor/editor_decorator.h"
@@ -51,7 +53,6 @@
 #include "app/ui/timeline/timeline.h"
 #include "app/ui/toolbar.h"
 #include "app/ui_context.h"
-#include "app/util/conversion_to_surface.h"
 #include "app/util/layer_utils.h"
 #include "base/chrono.h"
 #include "base/convert_to.h"
@@ -246,6 +247,11 @@ bool Editor::isUsingNewRenderEngine() const
 {
   ASSERT(m_sprite);
   return
+    // TODO add an option to the ShaderRenderer to work as the "old"
+    //      engine (screen pixel by screen pixel) or as the "new"
+    //      engine (sprite pixel by sprite pixel)
+    (m_renderEngine->type() == EditorRender::Type::kShaderRenderer)
+    ||
     (Preferences::instance().experimental.newRenderEngine()
      // Reference layers + zoom > 100% need the old render engine for
      // sub-pixel rendering.
@@ -377,7 +383,7 @@ void Editor::setLayer(const Layer* layer)
         // If the user want to see the active layer edges...
         m_docPref.show.layerEdges() ||
         // If there is a different opacity for nonactive-layers
-        Preferences::instance().experimental.nonactiveLayersOpacity() < 255 ||
+        otherLayersOpacity() < 255 ||
         // If the automatic cel guides are visible...
         m_showGuidesThisCel ||
         // If grid settings changed
@@ -654,27 +660,20 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
     dest.h = rc.h;
   }
 
-  std::unique_ptr<Image> rendered(nullptr);
+  // Convert the render to a os::Surface
+  static os::SurfaceRef rendered = nullptr; // TODO move this to other centralized place
+  const auto& renderProperties = m_renderEngine->properties();
   try {
     // Generate a "expose sprite pixels" notification. This is used by
     // tool managers that need to validate this region (copy pixels from
     // the original cel) before it can be used by the RenderEngine.
     m_document->notifyExposeSpritePixels(m_sprite, gfx::Region(expose));
 
-    // Create a temporary RGB bitmap to draw all to it
-    rendered.reset(Image::create(IMAGE_RGB, rc2.w, rc2.h,
-                                 m_renderEngine->getRenderImageBuffer()));
-
     m_renderEngine->setNewBlendMethod(pref.experimental.newBlend());
     m_renderEngine->setRefLayersVisiblity(true);
     m_renderEngine->setSelectedLayer(m_layer);
-    if (m_flags & Editor::kUseNonactiveLayersOpacityWhenEnabled)
-      m_renderEngine->setNonactiveLayersOpacity(pref.experimental.nonactiveLayersOpacity());
-    else
-      m_renderEngine->setNonactiveLayersOpacity(255);
-    m_renderEngine->setProjection(
-      newEngine ? render::Projection(): m_proj);
-    m_renderEngine->setupBackground(m_document, rendered->pixelFormat());
+    m_renderEngine->setNonactiveLayersOpacity(otherLayersOpacity());
+    m_renderEngine->setupBackground(m_document, IMAGE_RGB);
     m_renderEngine->disableOnionskin();
 
     if ((m_flags & kShowOnionskin) == kShowOnionskin) {
@@ -713,6 +712,32 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
         m_layer, m_frame);
     }
 
+    // Render background first (e.g. new ShaderRenderer will paint the
+    // background on the screen first and then composite the rendered
+    // sprite on it.)
+    if (renderProperties.renderBgOnScreen) {
+      m_renderEngine->setProjection(m_proj);
+      m_renderEngine->renderCheckeredBackground(
+        g->getInternalSurface(),
+        m_sprite,
+        gfx::Clip(dest.x + g->getInternalDeltaX(),
+                  dest.y + g->getInternalDeltaY(),
+                  m_proj.apply(rc2)));
+    }
+
+    // Create a temporary surface to draw the sprite on it
+    if (!rendered ||
+        rendered->width() < rc2.w ||
+        rendered->height() < rc2.h ||
+        rendered->colorSpace() != m_document->osColorSpace()) {
+      const int maxw = std::max(rc2.w, rendered ? rendered->width(): 0);
+      const int maxh = std::max(rc2.h, rendered ? rendered->height(): 0);
+      rendered = os::instance()->makeRgbaSurface(
+        maxw, maxh, m_document->osColorSpace());
+    }
+
+    m_renderEngine->setProjection(
+      newEngine ? render::Projection(): m_proj);
     m_renderEngine->renderSprite(
       rendered.get(), m_sprite, m_frame, gfx::Clip(0, 0, rc2));
 
@@ -727,70 +752,42 @@ void Editor::drawOneSpriteUnclippedRect(ui::Graphics* g, const gfx::Rect& sprite
     Console::showException(e);
   }
 
-  if (rendered) {
-    // Convert the render to a os::Surface
-    static os::SurfaceRef tmp = nullptr; // TODO move this to other centralized place
-
-    if (!tmp ||
-        tmp->width() < rc2.w ||
-        tmp->height() < rc2.h ||
-        tmp->colorSpace() != m_document->osColorSpace()) {
-      const int maxw = std::max(rc2.w, tmp ? tmp->width(): 0);
-      const int maxh = std::max(rc2.h, tmp ? tmp->height(): 0);
-      tmp = os::instance()->makeSurface(
-        maxw, maxh, m_document->osColorSpace());
-    }
-
-    if (tmp->nativeHandle()) {
-      if (newEngine) {
-        // Without doing something on the "tmp" surface before (like
-        // just drawing a pixel), we get a strange behavior where
-        // pixels are not updated correctly on the editor (e.g. when
-        // zoom < 100%). I didn't have enough time to investigate this
-        // issue yet, but this is a partial fix/hack.
-        //
-        // TODO review why do we need to do this, it looks like some
-        //      internal state of a SkCanvas or SkBitmap thing is
-        //      updated after this, because convert_image_to_surface()
-        //      will overwrite these pixels anyway.
-        os::Paint paint;
-        paint.color(gfx::rgba(0, 0, 0, 255));
-        tmp->drawRect(gfx::Rect(0, 0, 1, 1), paint);
-      }
-
-      convert_image_to_surface(rendered.get(), m_sprite->palette(m_frame),
-                               tmp.get(), 0, 0, 0, 0, rc2.w, rc2.h);
-
-      if (newEngine) {
-        os::Sampling sampling;
-        if (m_proj.scaleX() < 1.0) {
-          switch (pref.editor.downsampling()) {
-            case gen::Downsampling::NEAREST:
-              sampling = os::Sampling(os::Sampling::Filter::Nearest);
-              break;
-            case gen::Downsampling::BILINEAR:
-              sampling = os::Sampling(os::Sampling::Filter::Linear);
-              break;
-            case gen::Downsampling::BILINEAR_MIPMAP:
-              sampling = os::Sampling(os::Sampling::Filter::Linear,
-                                      os::Sampling::Mipmap::Nearest);
-              break;
-            case gen::Downsampling::TRILINEAR_MIPMAP:
-              sampling = os::Sampling(os::Sampling::Filter::Linear,
-                                      os::Sampling::Mipmap::Linear);
-              break;
-          }
+  if (rendered && rendered->nativeHandle()) {
+    if (newEngine) {
+      os::Sampling sampling;
+      if (m_proj.scaleX() < 1.0) {
+        switch (pref.editor.downsampling()) {
+          case gen::Downsampling::NEAREST:
+            sampling = os::Sampling(os::Sampling::Filter::Nearest);
+            break;
+          case gen::Downsampling::BILINEAR:
+            sampling = os::Sampling(os::Sampling::Filter::Linear);
+            break;
+          case gen::Downsampling::BILINEAR_MIPMAP:
+            sampling = os::Sampling(os::Sampling::Filter::Linear,
+                                    os::Sampling::Mipmap::Nearest);
+            break;
+          case gen::Downsampling::TRILINEAR_MIPMAP:
+            sampling = os::Sampling(os::Sampling::Filter::Linear,
+                                    os::Sampling::Mipmap::Linear);
+            break;
         }
+      }
 
-        g->drawSurface(tmp.get(),
-                       gfx::Rect(0, 0, rc2.w, rc2.h),
-                       dest,
-                       sampling,
-                       nullptr);
-      }
-      else {
-        g->blit(tmp.get(), 0, 0, dest.x, dest.y, dest.w, dest.h);
-      }
+      os::Paint p;
+      if (renderProperties.requiresRgbaBackbuffer)
+        p.blendMode(os::BlendMode::SrcOver);
+      else
+        p.blendMode(os::BlendMode::Src);
+
+      g->drawSurface(rendered.get(),
+                     gfx::Rect(0, 0, rc2.w, rc2.h),
+                     dest,
+                     sampling,
+                     &p);
+    }
+    else {
+      g->blit(rendered.get(), 0, 0, dest.x, dest.y, dest.w, dest.h);
     }
   }
 
@@ -1085,16 +1082,17 @@ void Editor::drawGrid(Graphics* g, const gfx::Rect& spriteBounds, const Rect& gr
   if (grid.y < 0) grid.y += grid.h;
 
   // Convert the "grid" rectangle to screen coordinates
-  grid = editorToScreen(grid);
-  if (grid.w < 1 || grid.h < 1)
+  RectF gridF(grid);
+  gridF = editorToScreenF(gridF);
+  if (gridF.w < 1. || gridF.h < 1.)
     return;
 
   // Adjust for client area
   gfx::Rect bounds = this->bounds();
-  grid.offset(-bounds.origin());
+  gridF.offset(-bounds.origin());
 
-  while (grid.x-grid.w >= spriteBounds.x) grid.x -= grid.w;
-  while (grid.y-grid.h >= spriteBounds.y) grid.y -= grid.h;
+  while (gridF.x-gridF.w >= spriteBounds.x) gridF.x -= gridF.w;
+  while (gridF.y-gridF.h >= spriteBounds.y) gridF.y -= gridF.h;
 
   // Get the grid's color
   gfx::Color grid_color = color_utils::color_for_ui(color);
@@ -1105,18 +1103,18 @@ void Editor::drawGrid(Graphics* g, const gfx::Rect& spriteBounds, const Rect& gr
 
   // Draw horizontal lines
   int x1 = spriteBounds.x;
-  int y1 = grid.y;
+  int y1 = gridF.y;
   int x2 = spriteBounds.x + spriteBounds.w;
   int y2 = spriteBounds.y + spriteBounds.h;
 
-  for (int c=y1; c<=y2; c+=grid.h)
+  for (double c=y1; c<=y2; c+=gridF.h)
     g->drawHLine(grid_color, x1, c, spriteBounds.w);
 
   // Draw vertical lines
-  x1 = grid.x;
+  x1 = gridF.x;
   y1 = spriteBounds.y;
 
-  for (int c=x1; c<=x2; c+=grid.w)
+  for (double c=x1; c<=x2; c+=gridF.w)
     g->drawVLine(grid_color, c, y1, spriteBounds.h);
 }
 
@@ -1919,8 +1917,16 @@ bool Editor::onProcessMessage(Message* msg)
 
     case kMouseEnterMessage:
       m_brushPreview.hide();
-      updateToolLoopModifiersIndicators();
-      updateQuicktool();
+
+      // Do not update tool loop modifiers when the mouse exits and/re-enters
+      // the editor area while we are inside the same tool loop (hasCapture()).
+      // E.g. This avoids starting to rotate a rectangular marquee (Alt key
+      // pressed) if we have the subtract mode on (Shift+Alt) and touch the
+      // editor edge (MouseLeave/Enter)
+      if (!hasCapture()) {
+        updateToolLoopModifiersIndicators();
+        updateQuicktool();
+      }
       break;
 
     case kMouseLeaveMessage:
@@ -2031,22 +2037,59 @@ bool Editor::onProcessMessage(Message* msg)
 
     case kKeyDownMessage:
 #if ENABLE_DEVMODE
-      // Switch render mode
-      if (!msg->ctrlPressed() &&
+      // Switch renderer
+      if (msg->modifiers() == 0 &&
           static_cast<KeyMessage*>(msg)->scancode() == kKeyF1) {
-        Preferences::instance().experimental.newRenderEngine(
-          !Preferences::instance().experimental.newRenderEngine());
-        invalidateCanvas();
+        // TODO replace this experimental flag with a new enum (or
+        //      maybe there is no need for user option now that the
+        //      new engine allows to disable the bilinear mipmapping
+        //      interpolation) as we still need the "old" engine to
+        //      render reference layers
+        auto& newRenderEngine = Preferences::instance().experimental.newRenderEngine;
+
+#if SK_ENABLE_SKSL
+        // Simple (new) -> Simple (old) -> Shader -> Simple (new) -> ...
+        if (m_renderEngine->type() == EditorRender::Type::kShaderRenderer) {
+          newRenderEngine(true);
+          m_renderEngine->setType(EditorRender::Type::kSimpleRenderer);
+        }
+        else {
+          if (newRenderEngine()) {
+            newRenderEngine(false);
+          }
+          else {
+            newRenderEngine(true);
+            m_renderEngine->setType(EditorRender::Type::kShaderRenderer);
+          }
+        }
+#else
+        // Simple (new) <-> Simple (old)
+        newRenderEngine(!newRenderEngine());
+#endif
+
+        switch (m_renderEngine->type()) {
+          case EditorRender::Type::kSimpleRenderer:
+            StatusBar::instance()->showTip(
+              1000, fmt::format("Simple Renderer ({})", newRenderEngine() ? "new": "old"));
+            break;
+          case EditorRender::Type::kShaderRenderer:
+            StatusBar::instance()->showTip(
+              1000, fmt::format("Shader Renderer"));
+            break;
+        }
+
+        app_refresh_screen();
         return true;
       }
-#endif
-      if (m_sprite) {
+#endif  // ENABLE_DEVMODE
+
+      if (m_sprite && (isActive() || hasMouse())) {
         EditorStatePtr holdState(m_state);
         bool used = m_state->onKeyDown(this, static_cast<KeyMessage*>(msg));
 
-        updateToolLoopModifiersIndicators();
-        updateAutoCelGuides(msg);
         if (hasMouse()) {
+          updateToolLoopModifiersIndicators();
+          updateAutoCelGuides(msg);
           updateQuicktool();
           setCursor(mousePosInDisplay());
         }
@@ -2057,13 +2100,13 @@ bool Editor::onProcessMessage(Message* msg)
       break;
 
     case kKeyUpMessage:
-      if (m_sprite) {
+      if (m_sprite && (isActive() || hasMouse())) {
         EditorStatePtr holdState(m_state);
         bool used = m_state->onKeyUp(this, static_cast<KeyMessage*>(msg));
 
-        updateToolLoopModifiersIndicators();
-        updateAutoCelGuides(msg);
         if (hasMouse()) {
+          updateToolLoopModifiersIndicators();
+          updateAutoCelGuides(msg);
           updateQuicktool();
           setCursor(mousePosInDisplay());
         }
@@ -2380,7 +2423,8 @@ bool Editor::canDraw()
           m_layer->isImage() &&
           m_layer->isVisibleHierarchy() &&
           m_layer->isEditableHierarchy() &&
-          !m_layer->isReference());
+          !m_layer->isReference() &&
+          !m_document->isReadOnly());
 }
 
 bool Editor::isInsideSelection()
@@ -2523,8 +2567,8 @@ void Editor::setZoomAndCenterInMouse(const Zoom& zoom,
   // extra space for the zoom)
   gfx::Rect visibleBounds = editorToScreen(
     getViewportBounds().createIntersection(gfx::Rect(gfx::Point(0, 0), canvasSize())));
-  screenPos.x = std::clamp(screenPos.x, visibleBounds.x, visibleBounds.x2()-1);
-  screenPos.y = std::clamp(screenPos.y, visibleBounds.y, visibleBounds.y2()-1);
+  screenPos.x = std::clamp(screenPos.x, visibleBounds.x, std::max(visibleBounds.x, visibleBounds.x2()-1));
+  screenPos.y = std::clamp(screenPos.y, visibleBounds.y, std::max(visibleBounds.y, visibleBounds.y2()-1));
 
   spritePos = screenToEditor(screenPos);
 
@@ -2624,8 +2668,8 @@ void Editor::pasteImage(const Image* image, const Mask* mask)
     // Limit the image inside the sprite's bounds.
     if (sprite->width() <= image->width() ||
         sprite->height() <= image->height()) {
-      x = std::clamp(x, 0, image->width() - sprite->width());
-      y = std::clamp(y, 0, image->height() - sprite->height());
+      x = std::clamp(x, 0, std::max(0, sprite->width() - image->width()));
+      y = std::clamp(y, 0, std::max(0, sprite->height() - image->height()));
     }
     else {
       // Also we always limit the 1 image pixel inside the sprite's bounds.
@@ -2788,76 +2832,31 @@ bool Editor::isPlaying() const
   return m_isPlaying;
 }
 
-void Editor::showAnimationSpeedMultiplierPopup(Option<bool>& playOnce,
-                                               Option<bool>& playAll,
-                                               Option<bool>& playSubtags,
-                                               const bool withStopBehaviorOptions)
+void Editor::showAnimationSpeedMultiplierPopup()
 {
-  const double options[] = { 0.25, 0.5, 1.0, 1.5, 2.0, 3.0 };
-  Menu menu;
+  const bool wasPlaying = isPlaying();
 
-  for (double option : options) {
-    MenuItem* item = new MenuItem(fmt::format(Strings::preview_speed_x(), option));
-    item->Click.connect([this, option]{ setAnimationSpeedMultiplier(option); });
-    item->setSelected(m_aniSpeed == option);
-    menu.addChild(item);
+  if (auto menu = AppMenus::instance()->getAnimationMenu()) {
+    UIContext::SetTargetView setView(m_docView);
+    menu->showPopup(mousePosInDisplay(), display());
   }
 
-  menu.addChild(new MenuSeparator);
-
-  // Play once option
-  {
-    MenuItem* item = new MenuItem(Strings::preview_play_once());
-    item->Click.connect(
-      [&playOnce]() {
-        playOnce(!playOnce());
-      });
-    item->setSelected(playOnce());
-    menu.addChild(item);
-  }
-
-  // Play all option
-  {
-    MenuItem* item = new MenuItem(Strings::preview_play_all_no_tags());
-    item->Click.connect(
-      [&playAll]() {
-        playAll(!playAll());
-      });
-    item->setSelected(playAll());
-    menu.addChild(item);
-  }
-
-  // Play subtags & repeats
-  {
-    MenuItem* item = new MenuItem(Strings::preview_play_subtags_and_repeats());
-    item->Click.connect(
-      [&playSubtags]() {
-        playSubtags(!playSubtags());
-      });
-    item->setSelected(playSubtags());
-    menu.addChild(item);
-  }
-
-  if (withStopBehaviorOptions) {
-    MenuItem* item = new MenuItem(Strings::preview_rewind_on_stop());
-    item->Click.connect(
-      []() {
-        // Switch the "rewind_on_stop" option
-        Preferences::instance().general.rewindOnStop(
-          !Preferences::instance().general.rewindOnStop());
-      });
-    item->setSelected(Preferences::instance().general.rewindOnStop());
-    menu.addChild(item);
-  }
-
-  menu.showPopup(mousePosInDisplay(), display());
-
-  if (isPlaying()) {
+  if (wasPlaying) {
     // Re-play
     stop();
-    play(playOnce(),
-         playAll(),
-         playSubtags());
+
+    // TODO improve/generalize this in some way
+    auto& pref = Preferences::instance();
+    if (m_docView->isPreview()) {
+      play(pref.preview.playOnce(),
+           pref.preview.playAll(),
+           pref.preview.playSubtags());
+    }
+    else {
+      play(pref.editor.playOnce(),
+           pref.editor.playAll(),
+           pref.editor.playSubtags());
+    }
   }
 }
 
@@ -2984,9 +2983,18 @@ void Editor::updateAutoCelGuides(ui::Message* msg)
   }
 }
 
+int Editor::otherLayersOpacity() const
+{
+  if (m_docView && m_docView->isPreview())
+    return Preferences::instance().experimental.nonactiveLayersOpacityPreview();
+  else
+    return Preferences::instance().experimental.nonactiveLayersOpacity();
+}
+
 // static
 void Editor::registerCommands()
 {
+  // TODO merge with ToggleOtherLayersOpacity
   Commands::instance()
     ->add(
       new QuickCommand(

@@ -14,6 +14,7 @@
 #include "app/color_utils.h"
 #include "app/modules/gfx.h"
 #include "app/ui/color_sliders.h"
+#include "app/ui/expr_entry.h"
 #include "app/ui/skin/skin_slider_property.h"
 #include "app/ui/skin/skin_theme.h"
 #include "base/scoped_value.h"
@@ -128,13 +129,14 @@ namespace {
     app::Color m_color;
   };
 
-  class ColorEntry : public Entry {
+  class ColorEntry : public ExprEntry {
   public:
     ColorEntry(Slider* absSlider, Slider* relSlider)
-      : Entry(4, "0")
+      : ExprEntry()
       , m_absSlider(absSlider)
       , m_relSlider(relSlider)
       , m_recent_focus(false) {
+      setText("0");
     }
 
   private:
@@ -241,7 +243,6 @@ ColorSliders::ColorSliders()
   , m_color(app::Color::fromMask())
 {
   addChild(&m_grid);
-  m_grid.setChildSpacing(0);
 
   // Same order as in Channel enum
   static_assert(Channel::Red == (Channel)0, "");
@@ -257,6 +258,12 @@ ColorSliders::ColorSliders()
   addSlider(Channel::HslLightness,  "L", 0, 100, -100, 100);
   addSlider(Channel::Gray,          "V", 0, 255, -100, 100);
   addSlider(Channel::Alpha,         "A", 0, 255, -100, 100);
+
+  InitTheme.connect(
+    [this] {
+      m_grid.setChildSpacing(0);
+    }
+  );
 
   m_appConn = App::instance()
     ->ColorSpaceChange.connect([this]{ invalidate(); });
@@ -445,7 +452,7 @@ void ColorSliders::syncRelHsvHslSliders()
 
 void ColorSliders::onSliderChange(const Channel i)
 {
-  base::ScopedValue<int> lock(m_lockSlider, i, m_lockSlider);
+  base::ScopedValue<int> lock(m_lockSlider, i);
 
   updateEntryText(i);
   onControlChange(i);
@@ -453,7 +460,7 @@ void ColorSliders::onSliderChange(const Channel i)
 
 void ColorSliders::onEntryChange(const Channel i)
 {
-  base::ScopedValue<int> lock(m_lockEntry, i, m_lockEntry);
+  base::ScopedValue<int> lock(m_lockEntry, i);
 
   // Update the slider related to the changed entry widget.
   int value = m_items[i].entry->textInt();

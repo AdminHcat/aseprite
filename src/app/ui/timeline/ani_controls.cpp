@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2022  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2017  David Capello
 //
 // This program is distributed under the terms of
@@ -44,11 +44,11 @@ AniControls::AniControls(TooltipManager* tooltipManager)
 {
   auto theme = SkinTheme::get(this);
 
-  addItem(theme->parts.aniFirst());
-  addItem(theme->parts.aniPrevious());
-  addItem(theme->parts.aniPlay());
-  addItem(theme->parts.aniNext());
-  addItem(theme->parts.aniLast());
+  addItem(theme->parts.aniFirst(), "ani_button");
+  addItem(theme->parts.aniPrevious(), "ani_button");
+  addItem(theme->parts.aniPlay(), "ani_button");
+  addItem(theme->parts.aniNext(), "ani_button");
+  addItem(theme->parts.aniLast(), "ani_button");
   ItemChange.connect([this]{ onClickButton(); });
 
   setTriggerOnMouseUp(true);
@@ -95,10 +95,7 @@ void AniControls::onRightClick(Item* item)
 
   auto editor = Editor::activeEditor();
   if (item == getItem(ACTION_PLAY) && editor) {
-    editor->showAnimationSpeedMultiplierPopup(
-      Preferences::instance().editor.playOnce,
-      Preferences::instance().editor.playAll,
-      Preferences::instance().editor.playSubtags, true);
+    editor->showAnimationSpeedMultiplierPopup();
   }
 }
 

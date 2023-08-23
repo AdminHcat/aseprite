@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2021-2022  Igara Studio S.A.
+// Copyright (C) 2021-2023  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -9,6 +9,7 @@
 #endif
 
 #include "app/app.h"
+#include "app/commands/command.h"
 #include "app/context.h"
 #include "app/context_observer.h"
 #include "app/doc.h"
@@ -20,9 +21,12 @@
 #include "app/script/engine.h"
 #include "app/script/luacpp.h"
 #include "app/script/values.h"
+#include "app/site.h"
+#include "app/ui/main_window.h"
 #include "doc/document.h"
 #include "doc/sprite.h"
 #include "ui/app_state.h"
+#include "ui/resize_event.h"
 
 #include <any>
 #include <cstring>
@@ -45,8 +49,10 @@ namespace {
 using EventListener = int;
 
 class AppEvents;
+class WindowEvents;
 class SpriteEvents;
 static std::unique_ptr<AppEvents> g_appEvents;
+static std::unique_ptr<WindowEvents> g_windowEvents;
 static std::map<doc::ObjectId, std::unique_ptr<SpriteEvents>> g_spriteEvents;
 
 class Events {
@@ -143,10 +149,20 @@ private:
   std::vector<EventListeners> m_listeners;
 };
 
+// Used in BeforeCommand
+static bool s_stopPropagationFlag = false;
+
 class AppEvents : public Events
                 , private ContextObserver {
 public:
-  enum : EventType { Unknown = -1, SiteChange, FgColorChange, BgColorChange };
+  enum : EventType {
+    Unknown = -1,
+    SiteChange,
+    FgColorChange,
+    BgColorChange,
+    BeforeCommand,
+    AfterCommand,
+  };
 
   AppEvents() {
   }
@@ -158,6 +174,10 @@ public:
       return FgColorChange;
     else if (std::strcmp(eventName, "bgcolorchange") == 0)
       return BgColorChange;
+    else if (std::strcmp(eventName, "beforecommand") == 0)
+      return BeforeCommand;
+    else if (std::strcmp(eventName, "aftercommand") == 0)
+      return AfterCommand;
     else
       return Unknown;
   }
@@ -165,17 +185,28 @@ public:
 private:
 
   void onAddFirstListener(EventType eventType) override {
+    auto app = App::instance();
+    auto ctx = app->context();
+    auto& pref = Preferences::instance();
     switch (eventType) {
       case SiteChange:
-        App::instance()->context()->add_observer(this);
+        ctx->add_observer(this);
         break;
       case FgColorChange:
-        m_fgConn = Preferences::instance().colorBar.fgColor
-          .AfterChange.connect([this]{ onFgColorChange(); });
+        m_fgConn = pref.colorBar.fgColor.AfterChange
+          .connect([this]{ onFgColorChange(); });
         break;
       case BgColorChange:
-        m_bgConn = Preferences::instance().colorBar.bgColor
-          .AfterChange.connect([this]{ onBgColorChange(); });
+        m_bgConn = pref.colorBar.bgColor.AfterChange
+          .connect([this]{ onBgColorChange(); });
+        break;
+      case BeforeCommand:
+        m_beforeCmdConn = ctx->BeforeCommandExecution
+          .connect(&AppEvents::onBeforeCommand, this);
+        break;
+      case AfterCommand:
+        m_afterCmdConn = ctx->AfterCommandExecution
+          .connect(&AppEvents::onAfterCommand, this);
         break;
     }
   }
@@ -191,6 +222,12 @@ private:
       case BgColorChange:
         m_bgConn.disconnect();
         break;
+      case BeforeCommand:
+        m_beforeCmdConn.disconnect();
+        break;
+      case AfterCommand:
+        m_afterCmdConn.disconnect();
+        break;
     }
   }
 
@@ -202,13 +239,85 @@ private:
     call(BgColorChange);
   }
 
+  void onBeforeCommand(CommandExecutionEvent& ev) {
+    s_stopPropagationFlag = false;
+    call(BeforeCommand, { { "name", ev.command()->id() },
+                          { "params", ev.params() },
+                          { "stopPropagation",
+                            (lua_CFunction)
+                            [](lua_State*) -> int {
+                              s_stopPropagationFlag = true;
+                              return 0;
+                            } } });
+    if (s_stopPropagationFlag)
+      ev.cancel();
+  }
+
+  void onAfterCommand(CommandExecutionEvent& ev) {
+    call(AfterCommand, { { "name", ev.command()->id() },
+                         { "params", ev.params() } });
+  }
+
   // ContextObserver impl
   void onActiveSiteChange(const Site& site) override {
-    call(SiteChange);
+    const bool fromUndo = (site.document() &&
+                           site.document()->isUndoing());
+    call(SiteChange, { { "fromUndo", fromUndo } });
   }
 
   obs::scoped_connection m_fgConn;
   obs::scoped_connection m_bgConn;
+  obs::scoped_connection m_beforeCmdConn;
+  obs::scoped_connection m_afterCmdConn;
+  obs::scoped_connection m_beforePaintConn;
+};
+
+class WindowEvents : public Events
+                   , private ContextObserver {
+public:
+  enum : EventType {
+    Unknown = -1,
+    Resize,
+  };
+
+  WindowEvents(ui::Window* window)
+    : m_window(window) {
+  }
+
+  ui::Window* window() const { return m_window; }
+
+  EventType eventType(const char* eventName) const override {
+    if (std::strcmp(eventName, "resize") == 0)
+      return Resize;
+    else
+      return Unknown;
+  }
+
+private:
+
+  void onAddFirstListener(EventType eventType) override {
+    switch (eventType) {
+      case Resize:
+        m_resizeConn = m_window->Resize.connect(&WindowEvents::onResize, this);
+        break;
+    }
+  }
+
+  void onRemoveLastListener(EventType eventType) override {
+    switch (eventType) {
+      case Resize:
+        m_resizeConn.disconnect();
+        break;
+    }
+  }
+
+  void onResize(ui::ResizeEvent& ev) {
+    call(Resize, { { "width", ev.bounds().w },
+                   { "height", ev.bounds().h } });
+  }
+
+  ui::Window* m_window;
+  obs::scoped_connection m_resizeConn;
 };
 
 class SpriteEvents : public Events
@@ -219,6 +328,7 @@ public:
     Unknown = -1,
     Change,
     FilenameChange,
+    AfterAddTile,
 #if ENABLE_REMAP_TILESET_EVENT
     RemapTileset,
 #endif
@@ -248,6 +358,8 @@ public:
       return Change;
     else if (std::strcmp(eventName, "filenamechange") == 0)
       return FilenameChange;
+    else if (std::strcmp(eventName, "afteraddtile") == 0)
+      return AfterAddTile;
 #if ENABLE_REMAP_TILESET_EVENT
     else if (std::strcmp(eventName, "remaptileset") == 0)
       return RemapTileset;
@@ -270,11 +382,20 @@ public:
     call(FilenameChange);
   }
 
+  void onAfterAddTile(DocEvent& ev) override {
+    call(AfterAddTile, { { "sprite", ev.sprite() },
+                         { "layer", ev.layer() },
+                         // This is detected as a "int" type
+                         { "frameNumber", ev.frame()+1 },
+                         { "tileset", ev.tileset() },
+                         { "tileIndex", ev.tileIndex() } });
+  }
+
 #if ENABLE_REMAP_TILESET_EVENT
   void onRemapTileset(DocEvent& ev, const doc::Remap& remap) override {
     const bool fromUndo = (ev.document()->transaction() == nullptr);
     call(RemapTileset, { { "remap", std::any(&remap) },
-                         { "tileset", std::any((const doc::Tileset*)ev.tileset()) },
+                         { "tileset", ev.tileset() },
                          { "fromUndo", fromUndo } });
   }
 #endif
@@ -449,6 +570,22 @@ void push_sprite_events(lua_State* L, Sprite* sprite)
 
   push_ptr<Events>(L, spriteEvents);
 }
+
+#ifdef ENABLE_UI
+
+void push_window_events(lua_State* L, ui::Window* window)
+{
+  if (!g_windowEvents) {
+    App::instance()->ExitGui.connect([]{ g_windowEvents.reset(); });
+    g_windowEvents = std::make_unique<WindowEvents>(window);
+  }
+  else {
+    ASSERT(g_windowEvents->window() == window);
+  }
+  push_ptr<Events>(L, g_windowEvents.get());
+}
+
+#endif // ENABLE_UI
 
 } // namespace script
 } // namespace app

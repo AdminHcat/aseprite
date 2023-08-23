@@ -81,6 +81,7 @@ void ListBox::selectChild(Widget* item, Message* msg)
     // Save current state of all children when we start selecting
     if (msg == nullptr ||
         msg->type() == kMouseDownMessage ||
+        (msg->type() == kMouseMoveMessage && m_firstSelectedIndex < 0) ||
         msg->type() == kKeyDownMessage) {
       m_firstSelectedIndex = itemIndex;
       m_states.resize(children().size());
@@ -248,16 +249,21 @@ bool ListBox::onProcessMessage(Message* msg)
           if (dynamic_cast<ui::Separator*>(picked))
             picked = nullptr;
 
-          // If the picked widget is a child of the list, select it
-          if (picked && hasChild(picked))
-            selectChild(picked, msg);
+          // If the picked widget has this list as an ancestor, select the item containing it.
+          if (picked && picked->hasAncestor(this)) {
+            ListItem *it = findParentListItem(picked);
+            selectChild(it, msg);
+          }
         }
       }
       return true;
 
     case kMouseUpMessage:
-      if (hasCapture())
+      if (hasCapture()) {
         releaseMouse();
+        m_firstSelectedIndex = -1;
+        m_lastSelectedIndex = -1;
+      }
       return true;
 
     case kMouseWheelMessage: {
@@ -457,6 +463,18 @@ int ListBox::advanceIndexThroughVisibleItems(
     }
   }
   return lastVisibleIndex;
+}
+
+ListItem* ListBox::findParentListItem(Widget* descendant)
+{
+  if (descendant->parent() == this)
+    return static_cast<ListItem*>(descendant);
+
+  for (Widget* widget=descendant->parent(); widget; widget=widget->parent()) {
+    return findParentListItem(widget);
+  }
+
+ return nullptr;
 }
 
 } // namespace ui

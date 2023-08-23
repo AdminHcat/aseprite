@@ -13,6 +13,7 @@ add_library(doc-lib
   algorithm/floodfill.cpp
   algorithm/modify_selection.cpp
   algorithm/polygon.cpp
+  algorithm/random_image.cpp
   algorithm/resize_image.cpp
   algorithm/rotate.cpp
   algorithm/rotsprite.cpp
@@ -57,6 +58,7 @@ add_library(doc-lib
   playback.cpp
   primitives.cpp
   remap.cpp
+  render_plan.cpp
   rgbmap_rgb5a3.cpp
   selected_frames.cpp
   selected_layers.cpp

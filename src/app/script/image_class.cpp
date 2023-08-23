@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2022  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2015-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -11,10 +11,12 @@
 
 #include "app/cmd/copy_rect.h"
 #include "app/cmd/copy_region.h"
+#include "app/cmd/flip_image.h"
 #include "app/commands/new_params.h" // Used for enum <-> Lua conversions
 #include "app/context.h"
 #include "app/doc.h"
 #include "app/file/file.h"
+#include "app/script/blend_mode.h"
 #include "app/script/docobj.h"
 #include "app/script/engine.h"
 #include "app/script/luacpp.h"
@@ -24,6 +26,8 @@
 #include "app/util/autocrop.h"
 #include "app/util/resize_image.h"
 #include "base/fs.h"
+#include "doc/algorithm/flip_image.h"
+#include "doc/algorithm/flip_type.h"
 #include "doc/algorithm/shrink_bounds.h"
 #include "doc/cel.h"
 #include "doc/image.h"
@@ -40,6 +44,8 @@ namespace app {
 namespace script {
 
 namespace {
+
+static ImageBufferPtr buf; // TODO non-thread safe
 
 struct ImageObj {
   doc::ObjectId imageId = 0;
@@ -217,13 +223,25 @@ int Image_clear(lua_State* L)
   auto obj = get_obj<ImageObj>(L, 1);
   auto img = obj->image(L);
   doc::color_t color;
-  if (lua_isnone(L, 2))
+  gfx::Rect rc;
+  int i = 2;
+
+  if (auto rcPtr = may_get_obj<gfx::Rect>(L, i)) {
+    rc = *rcPtr;
+    ++i;
+  }
+  else {
+    rc = img->bounds();         // Clear the whole image
+  }
+
+  if (lua_isnone(L, i))
     color = img->maskColor();
-  else if (lua_isinteger(L, 2))
-    color = lua_tointeger(L, 2);
+  else if (lua_isinteger(L, i))
+    color = lua_tointeger(L, i);
   else
-    color = convert_args_into_pixel_color(L, 2, img->pixelFormat());
-  doc::clear_image(img, color);
+    color = convert_args_into_pixel_color(L, i, img->pixelFormat());
+
+  doc::fill_rect(img, rc, color); // Clips the rectangle to the image bounds
   return 0;
 }
 
@@ -247,23 +265,54 @@ int Image_drawImage(lua_State* L)
   auto obj = get_obj<ImageObj>(L, 1);
   auto sprite = get_obj<ImageObj>(L, 2);
   gfx::Point pos = convert_args_into_point(L, 3);
+
+  // Arguments index fix to support the following cases:
+  //   - Image:drawImage(image, x, y, opacity, blendMode)
+  //   - Image:drawImage(image, Point(x, y), opacity, blendMode)
+  //   - Image:drawImage(image, {x, y}, opacity, blendMode)
+  //   - Image:drawImage(image, {x=x1, y=y1}, opacity, blendMode)
+  //
+  // TODO create a similar convert_args_into_point() function so we
+  //      can get the argsFix/modified index directly from there to
+  //      read the next argument
+  int argsFix = 0;
+  if (lua_isinteger(L, 3))
+    argsFix = 1;
+
+  int opacity = 255;
+  if (lua_isinteger(L, 4 + argsFix))
+    opacity = std::clamp(int(lua_tointeger(L, 4 + argsFix)), 0, 255);
+
+  doc::BlendMode blendMode = doc::BlendMode::NORMAL;
+  if (lua_isinteger(L, 5 + argsFix)) {
+    blendMode = base::convert_to<doc::BlendMode>(
+                  app::script::BlendMode(lua_tointeger(L, 5 + argsFix)));
+  }
+
   Image* dst = obj->image(L);
   const Image* src = sprite->image(L);
 
   // If the destination image is not related to a sprite, we just draw
   // the source image without undo information.
   if (obj->cel(L) == nullptr) {
-    doc::copy_image(dst, src, pos.x, pos.y);
+    doc::blend_image(dst, src,
+                     pos.x, pos.y,
+                     opacity, blendMode);
   }
   else {
     gfx::Rect bounds(0, 0, src->size().w, src->size().h);
-
+    buf.reset(new doc::ImageBuffer);
+    ImageRef tmp_src(
+      doc::crop_image(dst,
+                      gfx::Rect(pos.x, pos.y, src->size().w, src->size().h),
+                      0, buf));
+    doc::blend_image(tmp_src.get(), src, 0, 0, opacity, blendMode);
     // TODO Use something similar to doc::algorithm::shrink_bounds2()
     //      but we need something that does the render and compares
     //      the minimal modified area.
     Tx tx;
     tx(new cmd::CopyRegion(
-         dst, src, gfx::Region(bounds),
+         dst, tmp_src.get(), gfx::Region(bounds),
          gfx::Point(pos.x + bounds.x, pos.y + bounds.y)));
     tx.commit();
   }
@@ -532,6 +581,25 @@ int Image_shrinkBounds(lua_State* L)
   return 1;
 }
 
+int Image_flip(lua_State* L)
+{
+  auto obj = get_obj<ImageObj>(L, 1);
+  doc::Image* img = obj->image(L);
+  doc::algorithm::FlipType flipType = doc::algorithm::FlipType::FlipHorizontal;
+  if (lua_isinteger(L, 2))
+    flipType = (doc::algorithm::FlipType)lua_tointeger(L, 2);
+
+  if (obj->cel(L) == nullptr) {
+    doc::algorithm::flip_image(img, img->bounds(), flipType);
+  }
+  else {
+    Tx tx;
+    tx(new cmd::FlipImage(img, img->bounds(), flipType));
+    tx.commit();
+  }
+  return 0;
+}
+
 int Image_get_id(lua_State* L)
 {
   const auto obj = get_obj<ImageObj>(L, 1);
@@ -549,21 +617,29 @@ int Image_get_version(lua_State* L)
 int Image_get_rowStride(lua_State* L)
 {
   const auto obj = get_obj<ImageObj>(L, 1);
-  lua_pushinteger(L, obj->image(L)->getRowStrideSize());
+  lua_pushinteger(L, obj->image(L)->rowBytes());
+  return 1;
+}
+
+int Image_get_bytesPerPixel(lua_State* L)
+{
+  const auto obj = get_obj<ImageObj>(L, 1);
+  lua_pushinteger(L, obj->image(L)->bytesPerPixel());
   return 1;
 }
 
 int Image_get_bytes(lua_State* L)
 {
   const auto img = get_obj<ImageObj>(L, 1)->image(L);
-  lua_pushlstring(L, (const char*)img->getPixelAddress(0, 0), img->getRowStrideSize() * img->height());
+  lua_pushlstring(L, (const char*)img->getPixelAddress(0, 0),
+                  img->rowBytes() * img->height());
   return 1;
 }
 
 int Image_set_bytes(lua_State* L)
 {
   const auto img = get_obj<ImageObj>(L, 1)->image(L);
-  size_t bytes_size, bytes_needed = img->getRowStrideSize() * img->height();
+  size_t bytes_size, bytes_needed = img->rowBytes() * img->height();
   const char* bytes = lua_tolstring(L, 2, &bytes_size);
 
   if (bytes_size == bytes_needed) {
@@ -633,6 +709,7 @@ const luaL_Reg Image_methods[] = {
   { "saveAs", Image_saveAs },
   { "resize", Image_resize },
   { "shrinkBounds", Image_shrinkBounds },
+  { "flip", Image_flip },
   { "__gc", Image_gc },
   { "__eq", Image_eq },
   { nullptr, nullptr }
@@ -642,6 +719,7 @@ const Property Image_properties[] = {
   { "id", Image_get_id, nullptr },
   { "version", Image_get_version, nullptr },
   { "rowStride", Image_get_rowStride, nullptr },
+  { "bytesPerPixel", Image_get_bytesPerPixel, nullptr },
   { "bytes", Image_get_bytes, Image_set_bytes },
   { "width", Image_get_width, nullptr },
   { "height", Image_get_height, nullptr },

@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (c) 2022  Igara Studio S.A.
+// Copyright (c) 2022-2023  Igara Studio S.A.
 //
 // This program is distributed under the terms of
 // the End-User License Agreement for Aseprite.
@@ -18,18 +18,74 @@ namespace script {
 
 namespace {
 
-struct Theme { };
-struct ThemeDimension { };
+class Theme {
+public:
+  Theme(int uiscale) : m_uiscale(uiscale) { }
+
+  gfx::Border styleMetrics(const std::string& id) const {
+    auto theme = skin::SkinTheme::instance();
+    if (!theme) return gfx::Border(0);
+
+    ui::Style* style = theme->getStyleById(id);
+    if (!style) return gfx::Border(0);
+
+    ui::Widget widget(ui::kGenericWidget);
+    auto border = theme->calcBorder(&widget, style);
+    if (m_uiscale > 1)
+      border /= m_uiscale;
+
+    return border;
+  }
+
+  int getDimensionById(const std::string& id) const {
+    int value = skin::SkinTheme::instance()->getDimensionById(id);
+    if (m_uiscale > 1)
+      value /= m_uiscale;
+    return value;
+  }
+
+private:
+  int m_uiscale;
+};
+
+struct ThemeDimension {
+  const Theme theme;
+
+  ThemeDimension(const Theme& theme) : theme(theme) { }
+
+  int getById(const std::string& id) const {
+    return theme.getDimensionById(id);
+  }
+};
+
 struct ThemeColor { };
+
+#ifdef ENABLE_UI
+void push_border_as_table(lua_State* L, const gfx::Border& border)
+{
+  lua_newtable(L);
+  {
+    lua_newtable(L);
+    setfield_integer(L, "left", border.left());
+    setfield_integer(L, "top", border.top());
+    setfield_integer(L, "right", border.right());
+    setfield_integer(L, "bottom", border.bottom());
+  }
+  lua_setfield(L, -2, "border");
+}
+#endif
 
 int ThemeDimension_index(lua_State* L)
 {
+  [[maybe_unused]]
+  auto themeDimension = get_obj<ThemeDimension>(L, 1);
+
   const char* id = lua_tostring(L, 2);
   if (!id)
     return luaL_error(L, "id in app.theme.dimension.id must be a string");
 
 #ifdef ENABLE_UI
-  const int value = skin::SkinTheme::instance()->getDimensionById(id);
+  const int value = themeDimension->getById(id);
   lua_pushinteger(L, value);
 #else
   lua_pushinteger(L, 0);
@@ -52,9 +108,28 @@ int ThemeColor_index(lua_State* L)
   return 1;
 }
 
+int Theme_styleMetrics(lua_State* L)
+{
+  [[maybe_unused]]
+  auto theme = get_obj<Theme>(L, 1);
+
+  const char* id = lua_tostring(L, 2);
+  if (!id)
+    return 0;
+
+#ifdef ENABLE_UI
+  gfx::Border border = theme->styleMetrics(id);
+  push_border_as_table(L, border);
+  return 1;
+#else  // ENABLE_UI
+  return 0;
+#endif
+}
+
 int Theme_get_dimension(lua_State* L)
 {
-  push_obj<ThemeDimension>(L, ThemeDimension());
+  auto theme = get_obj<Theme>(L, 1);
+  push_new<ThemeDimension>(L, *theme);
   return 1;
 }
 
@@ -65,6 +140,7 @@ int Theme_get_color(lua_State* L)
 }
 
 const luaL_Reg Theme_methods[] = {
+  { "styleMetrics", Theme_styleMetrics },
   { nullptr, nullptr }
 };
 
@@ -98,9 +174,9 @@ void register_theme_classes(lua_State* L)
   REG_CLASS_PROPERTIES(L, Theme);
 }
 
-void push_app_theme(lua_State* L)
+void push_app_theme(lua_State* L, int uiscale)
 {
-  push_obj<Theme>(L, Theme());
+  push_new<Theme>(L, uiscale);
 }
 
 } // namespace script

@@ -13,6 +13,7 @@
 #include "app/cmd/set_layer_blend_mode.h"
 #include "app/cmd/set_layer_name.h"
 #include "app/cmd/set_layer_opacity.h"
+#include "app/cmd/set_layer_tileset.h"
 #include "app/cmd/set_tileset_base_index.h"
 #include "app/cmd/set_tileset_name.h"
 #include "app/cmd/set_user_data.h"
@@ -36,6 +37,7 @@
 #include "doc/layer_tilemap.h"
 #include "doc/sprite.h"
 #include "doc/tileset.h"
+#include "doc/tilesets.h"
 #include "doc/user_data.h"
 #include "ui/ui.h"
 
@@ -243,7 +245,7 @@ private:
     if (!m_layer)
       return;
 
-    base::ScopedValue<bool> switchSelf(m_selfUpdate, true, false);
+    base::ScopedValue switchSelf(m_selfUpdate, true);
 
     m_timer.stop();
 
@@ -355,7 +357,7 @@ private:
 
     // Information about the tileset to be used for new tilemaps
     TilesetSelector::Info tilesetInfo;
-    tilesetInfo.enabled = false;
+    tilesetInfo.allowNewTileset = false;
     tilesetInfo.newTileset = false;
     tilesetInfo.grid = tileset->grid();
     tilesetInfo.name = tileset->name();
@@ -373,9 +375,15 @@ private:
       tilesetInfo = tilesetSel.getInfo();
 
       if (tileset->name() != tilesetInfo.name ||
-          tileset->baseIndex() != tilesetInfo.baseIndex) {
+          tileset->baseIndex() != tilesetInfo.baseIndex ||
+          tilesetInfo.tsi != tilemap->tilesetIndex()) {
         ContextWriter writer(UIContext::instance());
         Tx tx(writer.context(), "Set Tileset Properties");
+        // User changed tilemap's tileset
+        if (tilesetInfo.tsi != tilemap->tilesetIndex()) {
+          tileset = tilemap->sprite()->tilesets()->get(tilesetInfo.tsi);
+          tx(new cmd::SetLayerTileset(tilemap, tilesetInfo.tsi));
+        }
         if (tileset->name() != tilesetInfo.name)
           tx(new cmd::SetTilesetName(tileset, tilesetInfo.name));
         if (tileset->baseIndex() != tilesetInfo.baseIndex)
@@ -396,7 +404,7 @@ private:
 
     m_timer.stop(); // Cancel current editions (just in case)
 
-    base::ScopedValue<bool> switchSelf(m_selfUpdate, true, false);
+    base::ScopedValue switchSelf(m_selfUpdate, true);
 
     const bool tilemapVisibility = (m_layer && m_layer->isTilemap());
     if (m_layer) {

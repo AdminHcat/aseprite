@@ -1,5 +1,5 @@
 // Aseprite Document Library
-// Copyright (c) 2018-2021 Igara Studio S.A.
+// Copyright (c) 2018-2023 Igara Studio S.A.
 // Copyright (c) 2001-2016 David Capello
 //
 // This file is released under the terms of the MIT license.
@@ -13,6 +13,7 @@
 
 #include "doc/algo.h"
 #include "doc/brush.h"
+#include "doc/dispatch.h"
 #include "doc/image_impl.h"
 #include "doc/palette.h"
 #include "doc/remap.h"
@@ -23,6 +24,10 @@
 #include <city.h>
 
 #include <stdexcept>
+
+#if defined(__x86_64__) || defined(_WIN64)
+  #include <emmintrin.h>
+#endif
 
 namespace doc {
 
@@ -65,6 +70,46 @@ void copy_image(Image* dst, const Image* src, int x, int y)
   ASSERT(src);
 
   dst->copy(src, gfx::Clip(x, y, 0, 0, src->width(), src->height()));
+}
+
+template<typename ImageTraits>
+void blend_image_templ(Image* dst,
+                       const Image* src,
+                       const int x, const int y,
+                       const int opacity,
+                       BlendFunc& blender)
+{
+  gfx::Clip area = gfx::Clip(x, y, 0, 0, src->width(), src->height());
+  if (!area.clip(dst->width(), dst->height(), src->width(), src->height()))
+    return;
+  LockImageBits<ImageTraits> dstBits(dst);
+  const LockImageBits<ImageTraits> srcBits(src);
+  auto dstIt = dstBits.begin_area(area.dstBounds());
+  auto srcIt = srcBits.begin_area(area.srcBounds());
+  auto dstEnd = dstBits.end_area(area.dstBounds());
+  for (; dstIt < dstEnd; ++dstIt, ++srcIt)
+    *dstIt = blender(*dstIt, *srcIt, opacity);
+}
+
+void blend_image(Image* dst, const Image* src, const int x, const int y,
+                 const int opacity,
+                 const doc::BlendMode blendMode)
+{
+  ASSERT(dst->pixelFormat() == src->pixelFormat());
+  BlendFunc blender;
+  switch (src->pixelFormat()) {
+    case IMAGE_RGB:
+      blender = get_rgba_blender(blendMode, true);
+      return blend_image_templ<RgbTraits>(dst, src, x, y, opacity, blender);
+    case IMAGE_GRAYSCALE:
+      blender = get_graya_blender(blendMode, true);
+      return blend_image_templ<GrayscaleTraits>(dst, src, x, y, opacity, blender);
+    case IMAGE_INDEXED:
+      blender = get_indexed_blender(blendMode, true);
+      return blend_image_templ<IndexedTraits>(dst, src, x, y, opacity, blender);
+    case IMAGE_TILEMAP:
+      return copy_image(dst, src, x, y);
+  }
 }
 
 void copy_image(Image* dst, const Image* src, const gfx::Region& rgn)
@@ -338,7 +383,7 @@ int count_diff_between_images_templ(const Image* i1, const Image* i2)
 }
 
 template<typename ImageTraits>
-int is_same_image_templ(const Image* i1, const Image* i2)
+bool is_same_image_templ(const Image* i1, const Image* i2)
 {
   const LockImageBits<ImageTraits> bits1(i1);
   const LockImageBits<ImageTraits> bits2(i2);
@@ -351,6 +396,77 @@ int is_same_image_templ(const Image* i1, const Image* i2)
   }
   ASSERT(it1 == end1);
   ASSERT(it2 == end2);
+  return true;
+}
+
+template<typename ImageTraits>
+bool is_same_image_simd_templ(const Image* i1, const Image* i2)
+{
+  using address_t = typename ImageTraits::address_t;
+  const int w = i1->width();
+  const int h = i1->height();
+  for (int y=0; y<h; ++y) {
+    auto p = (const address_t)i1->getPixelAddress(0, y);
+    auto q = (const address_t)i2->getPixelAddress(0, y);
+    int x = 0;
+
+#if DOC_USE_ALIGNED_PIXELS
+#if defined(__x86_64__) || defined(_WIN64)
+    // Use SSE2
+
+    if constexpr (ImageTraits::bytes_per_pixel == 4) {
+      for (; x+4<=w; x+=4, p+=4, q+=4) {
+        __m128i r = _mm_cmpeq_epi32(*(const __m128i*)p, *(const __m128i*)q);
+        if (_mm_movemask_epi8(r) != 0xffff) { // !_mm_test_all_ones(r)
+          if (!ImageTraits::same_color(p[0], q[0]) ||
+              !ImageTraits::same_color(p[1], q[1]) ||
+              !ImageTraits::same_color(p[2], q[2]) ||
+              !ImageTraits::same_color(p[3], q[3]))
+            return false;
+        }
+      }
+    }
+    else if constexpr (ImageTraits::bytes_per_pixel == 2) {
+      for (; x+8<=w; x+=8, p+=8, q+=8) {
+        __m128i r = _mm_cmpeq_epi16(*(const __m128i*)p, *(const __m128i*)q);
+        if (_mm_movemask_epi8(r) != 0xffff) { // !_mm_test_all_ones(r)
+          if (!ImageTraits::same_color(p[0], q[0]) ||
+              !ImageTraits::same_color(p[1], q[1]) ||
+              !ImageTraits::same_color(p[2], q[2]) ||
+              !ImageTraits::same_color(p[3], q[3]) ||
+              !ImageTraits::same_color(p[4], q[4]) ||
+              !ImageTraits::same_color(p[5], q[5]) ||
+              !ImageTraits::same_color(p[6], q[6]) ||
+              !ImageTraits::same_color(p[7], q[7]))
+            return false;
+        }
+      }
+    }
+    else if constexpr (ImageTraits::bytes_per_pixel == 1) {
+      for (; x+16<=w; x+=16, p+=16, q+=16) {
+        __m128i r = _mm_cmpeq_epi8(*(const __m128i*)p, *(const __m128i*)q);
+        if (_mm_movemask_epi8(r) != 0xffff) { // !_mm_test_all_ones(r)
+          return false;
+        }
+      }
+    }
+#endif
+#endif  // DOC_USE_ALIGNED_PIXELS
+    {
+      for (; x+4<=w; x+=4, p+=4, q+=4) {
+        if (!ImageTraits::same_color(p[0], q[0]) ||
+            !ImageTraits::same_color(p[1], q[1]) ||
+            !ImageTraits::same_color(p[2], q[2]) ||
+            !ImageTraits::same_color(p[3], q[3]))
+          return false;
+      }
+    }
+
+    for (; x<w; ++x, ++p, ++q) {
+      if (!ImageTraits::same_color(*p, *q))
+        return false;
+    }
+  }
   return true;
 }
 
@@ -395,20 +511,38 @@ int count_diff_between_images(const Image* i1, const Image* i2)
   return -1;
 }
 
-bool is_same_image(const Image* i1, const Image* i2)
+bool is_same_image_slow(const Image* i1, const Image* i2)
 {
-  if ((i1->pixelFormat() != i2->pixelFormat()) ||
+  if ((i1->colorMode() != i2->colorMode()) ||
       (i1->width() != i2->width()) ||
       (i1->height() != i2->height()))
     return false;
 
-  switch (i1->pixelFormat()) {
-    case IMAGE_RGB:       return is_same_image_templ<RgbTraits>(i1, i2);
-    case IMAGE_GRAYSCALE: return is_same_image_templ<GrayscaleTraits>(i1, i2);
-    case IMAGE_INDEXED:   return is_same_image_templ<IndexedTraits>(i1, i2);
-    case IMAGE_BITMAP:    return is_same_image_templ<BitmapTraits>(i1, i2);
-    case IMAGE_TILEMAP:   return is_same_image_templ<TilemapTraits>(i1, i2);
-  }
+  DOC_DISPATCH_BY_COLOR_MODE(
+    i1->colorMode(),
+    is_same_image_templ,
+    i1, i2);
+
+  ASSERT(false);
+  return false;
+}
+
+bool is_same_image(const Image* i1, const Image* i2)
+{
+  const ColorMode cm = i1->colorMode();
+
+  if ((cm != i2->colorMode()) ||
+      (i1->width() != i2->width()) ||
+      (i1->height() != i2->height()))
+    return false;
+
+  if (cm == ColorMode::BITMAP)
+    return is_same_image_templ<BitmapTraits>(i1, i2);
+
+  DOC_DISPATCH_BY_COLOR_MODE_EXCLUDE_BITMAP(
+    cm,
+    is_same_image_simd_templ,
+    i1, i2);
 
   ASSERT(false);
   return false;
@@ -459,19 +593,18 @@ static uint32_t calculate_image_hash_templ(const Image* image,
   static_assert(sizeof(void*) == 4, "This CPU is not 32-bit");
 #endif
 
-  const uint32_t rowlen = ImageTraits::getRowStrideBytes(bounds.w);
-  const uint32_t len = rowlen * bounds.h;
-  if (bounds == image->bounds()) {
+  const uint32_t widthBytes = ImageTraits::bytes_per_pixel * bounds.w;
+  const uint32_t len = widthBytes * bounds.h;
+  if (bounds == image->bounds() &&
+      widthBytes == image->rowBytes()) {
     return CITYHASH((const char*)image->getPixelAddress(0, 0), len);
   }
   else {
-    ASSERT(false);              // TODO not used at this moment
-
     std::vector<uint8_t> buf(len);
     uint8_t* dst = &buf[0];
-    for (int y=0; y<bounds.h; ++y, dst+=rowlen) {
-      auto src = image->getPixelAddress(bounds.x, bounds.y+y);
-      std::copy(dst, dst+rowlen, src);
+    for (int y=0; y<bounds.h; ++y, dst+=widthBytes) {
+      auto src = (const uint8_t*)image->getPixelAddress(bounds.x, bounds.y+y);
+      std::copy(src, src+widthBytes, dst);
     }
     return CITYHASH((const char*)&buf[0], buf.size());
   }

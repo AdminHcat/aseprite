@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2018-2022  Igara Studio S.A.
+// Copyright (C) 2018-2023  Igara Studio S.A.
 // Copyright (C) 2001-2018  David Capello
 //
 // This program is distributed under the terms of
@@ -27,6 +27,7 @@
 #include "base/memory.h"
 #include "doc/cel.h"
 #include "doc/layer.h"
+#include "doc/layer_tilemap.h"
 #include "doc/mask.h"
 #include "doc/mask_boundaries.h"
 #include "doc/palette.h"
@@ -156,6 +157,11 @@ DocApi Doc::getApi(Transaction& transaction)
 //////////////////////////////////////////////////////////////////////
 // Main properties
 
+bool Doc::isUndoing() const
+{
+  return m_undo->isUndoing();
+}
+
 color_t Doc::bgColor() const
 {
   return color_utils::color_for_target(
@@ -274,6 +280,17 @@ void Doc::notifyLayerGroupCollapseChange(Layer* layer)
   notify_observers<DocEvent&>(&DocObserver::onLayerCollapsedChanged, ev);
 }
 
+void Doc::notifyAfterAddTile(LayerTilemap* layer, frame_t frame, tile_index ti)
+{
+  DocEvent ev(this);
+  ev.sprite(layer->sprite());
+  ev.layer(layer);
+  ev.frame(frame);
+  ev.tileset(layer->tileset());
+  ev.tileIndex(ti);
+  notify_observers<DocEvent&>(&DocObserver::onAfterAddTile, ev);
+}
+
 bool Doc::isModified() const
 {
   return !m_undo->isInSavedStateOrSimilar();
@@ -325,6 +342,25 @@ void Doc::markAsBackedUp()
 bool Doc::isFullyBackedUp() const
 {
   return (m_flags & kFullyBackedUp ? true: false);
+}
+
+void Doc::markAsReadOnly()
+{
+  DOC_TRACE("DOC: Mark as read-only", this);
+
+  m_flags |= kReadOnly;
+}
+
+bool Doc::isReadOnly() const
+{
+  return (m_flags & kReadOnly ? true: false);
+}
+
+void Doc::removeReadOnlyMark()
+{
+  DOC_TRACE("DOC: Read-only mark removed", this);
+
+  m_flags &= ~kReadOnly;
 }
 
 //////////////////////////////////////////////////////////////////////

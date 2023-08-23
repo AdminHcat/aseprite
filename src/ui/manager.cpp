@@ -496,30 +496,37 @@ void Manager::generateMessagesFromOSEvents()
       }
 
       case os::Event::MouseEnter: {
-        if (get_multiple_displays()) {
-          if (osEvent.window()) {
-            ASSERT(display != nullptr);
-            _internal_set_mouse_display(display);
+        auto msg = new CallbackMessage([osEvent, display]{
+          if (get_multiple_displays()) {
+            if (osEvent.window()) {
+              ASSERT(display != nullptr);
+              _internal_set_mouse_display(display);
+            }
           }
-        }
-        set_mouse_cursor(kArrowCursor);
+          set_mouse_cursor(kArrowCursor);
+          mouse_display = display;
+        });
+        enqueueMessage(msg);
         lastMouseMoveEvent = osEvent;
-        mouse_display = display;
         break;
       }
 
       case os::Event::MouseLeave: {
-        if (mouse_display == display) {
-          set_mouse_cursor(kOutsideDisplay);
-          setMouse(nullptr);
+        auto msg = new CallbackMessage([this, display]{
+          if (mouse_display == display) {
+            set_mouse_cursor(kOutsideDisplay);
+            setMouse(nullptr);
 
-          _internal_no_mouse_position();
-          mouse_display = nullptr;
+            _internal_no_mouse_position();
+            mouse_display = nullptr;
+          }
+        });
 
-          // To avoid calling kSetCursorMessage when the mouse leaves
-          // the window.
-          lastMouseMoveEvent = os::Event();
-        }
+        enqueueMessage(msg);
+
+        // To avoid calling kSetCursorMessage when the mouse leaves
+        // the window.
+        lastMouseMoveEvent = os::Event();
         break;
       }
 
@@ -639,7 +646,10 @@ void Manager::handleMouseDown(Display* display,
                               PointerType pointerType,
                               const float pressure)
 {
-  handleWindowZOrder();
+  // Returns false in case that we click another Display (os::Window)
+  // that is not the current running top-most foreground window.
+  if (!handleWindowZOrder())
+    return;
 
   enqueueMessage(
     newMouseMessage(
@@ -730,45 +740,49 @@ void Manager::handleTouchMagnify(Display* display,
 // window that aren't the desktop).
 //
 // TODO code similar to Display::handleWindowZOrder()
-void Manager::handleWindowZOrder()
+bool Manager::handleWindowZOrder()
 {
   if (capture_widget || !mouse_widget)
-    return;
+    return true;
 
   // The clicked window
   Window* window = mouse_widget->window();
-  Manager* win_manager = (window ? window->manager(): nullptr);
+  Window* topWindow = getTopWindow();
 
   if ((window) &&
-    // We cannot change Z-order of desktop windows
-    (!window->isDesktop()) &&
-    // We cannot change Z order of foreground windows because a
-    // foreground window can launch other background windows
-    // which should be kept on top of the foreground one.
-    (!window->isForeground()) &&
-    // If the window is not already the top window of the manager.
-    (window != win_manager->getTopWindow())) {
-    base::ScopedValue<Widget*> scoped(m_lockedWindow, window, nullptr);
+      // We cannot change Z-order of desktop windows
+      (!window->isDesktop()) &&
+      // We cannot change Z order of foreground windows because a
+      // foreground window can launch other background windows
+      // which should be kept on top of the foreground one.
+      (!window->isForeground()) &&
+      // If the window is not already the top window of the manager.
+      (window != topWindow)) {
+    // If there is already a top foreground window, cancel the z-order change
+    if (topWindow && topWindow->isForeground())
+      return false;
+
+    base::ScopedValue<Widget*> scoped(m_lockedWindow, window);
 
     window->display()->handleWindowZOrder(window);
 
     // Put it in the top of the list
-    win_manager->removeChild(window);
+    removeChild(window);
 
     if (window->isOnTop())
-      win_manager->insertChild(0, window);
+      insertChild(0, window);
     else {
-      int pos = (int)win_manager->children().size();
+      int pos = (int)children().size();
 
-      for (auto it=win_manager->children().rbegin(),
-             end=win_manager->children().rend();
+      for (auto it=children().rbegin(),
+             end=children().rend();
            it != end; ++it) {
         if (static_cast<Window*>(*it)->isOnTop())
           break;
 
         --pos;
       }
-      win_manager->insertChild(pos, window);
+      insertChild(pos, window);
     }
 
     if (!window->ownDisplay())
@@ -777,6 +791,7 @@ void Manager::handleWindowZOrder()
 
   // Put the focus
   setFocus(mouse_widget);
+  return true;
 }
 
 // If display is nullptr, mousePos is in screen coordinates, if not,
@@ -784,8 +799,14 @@ void Manager::handleWindowZOrder()
 void Manager::updateMouseWidgets(const gfx::Point& mousePos,
                                  Display* display)
 {
-  gfx::Point screenPos = (display ? display->nativeWindow()->pointToScreen(mousePos):
-                                    mousePos);
+  gfx::Point screenPos;
+  if (display) {
+    screenPos = display->nativeWindow()->pointToScreen(mousePos);
+    display->updateLastMousePos(mousePos);
+  }
+  else {
+    screenPos = mousePos;
+  }
 
   // Get the list of widgets to send mouse messages.
   mouse_widgets_list.clear();
@@ -986,54 +1007,61 @@ void Manager::setMouse(Widget* widget)
             (widget ? widget->id(): ""));
 #endif
 
-  if ((mouse_widget != widget) && (!capture_widget)) {
-    Widget* commonAncestor = findLowestCommonAncestor(mouse_widget, widget);
+  if (mouse_widget == widget)
+    return;
 
-    // Fetch the mouse
-    if (mouse_widget && mouse_widget != commonAncestor) {
-      auto msg = new Message(kMouseLeaveMessage);
-      msg->setRecipient(mouse_widget);
-      msg->setPropagateToParent(true);
-      msg->setCommonAncestor(commonAncestor);
-      enqueueMessage(msg);
+  Widget* commonAncestor = findLowestCommonAncestor(mouse_widget, widget);
 
-      // Remove HAS_MOUSE from all the hierarchy
-      auto a = mouse_widget;
-      while (a && a != commonAncestor) {
-        a->disableFlags(HAS_MOUSE);
-        a = a->parent();
-      }
+  // Fetch the mouse
+  if (mouse_widget && mouse_widget != commonAncestor) {
+    auto msg = new Message(kMouseLeaveMessage);
+    msg->setRecipient(mouse_widget);
+    msg->setPropagateToParent(true);
+    msg->setCommonAncestor(commonAncestor);
+    enqueueMessage(msg);
+
+    // Remove HAS_MOUSE from all the hierarchy
+    auto a = mouse_widget;
+    while (a && a != commonAncestor) {
+      a->disableFlags(HAS_MOUSE);
+      a = a->parent();
     }
+  }
 
-    // Put the mouse
-    mouse_widget = widget;
-    if (widget) {
-      Display* display = mouse_widget->display();
-      gfx::Point mousePos = display->nativeWindow()->pointFromScreen(get_mouse_position());
+  // If the mouse is captured, we can just put the HAS_MOUSE flag in
+  // the captured widget (or in none).
+  if (capture_widget && capture_widget != widget) {
+    widget = nullptr;
+  }
 
-      auto msg = newMouseMessage(
-        kMouseEnterMessage,
-        display, nullptr,
-        mousePos,
-        PointerType::Unknown,
-        m_mouseButton,
-        kKeyUninitializedModifier);
+  // Put the mouse
+  mouse_widget = widget;
+  if (widget) {
+    Display* display = mouse_widget->display();
+    gfx::Point mousePos = display->nativeWindow()->pointFromScreen(get_mouse_position());
 
-      msg->setRecipient(widget);
-      msg->setPropagateToParent(true);
-      msg->setCommonAncestor(commonAncestor);
-      enqueueMessage(msg);
-      generateSetCursorMessage(display,
-                               mousePos,
-                               kKeyUninitializedModifier,
-                               PointerType::Unknown);
+    auto msg = newMouseMessage(
+      kMouseEnterMessage,
+      display, nullptr,
+      mousePos,
+      PointerType::Unknown,
+      m_mouseButton,
+      kKeyUninitializedModifier);
 
-      // Add HAS_MOUSE to all the hierarchy
-      auto a = mouse_widget;
-      while (a && a != commonAncestor) {
-        a->enableFlags(HAS_MOUSE);
-        a = a->parent();
-      }
+    msg->setRecipient(widget);
+    msg->setPropagateToParent(true);
+    msg->setCommonAncestor(commonAncestor);
+    enqueueMessage(msg);
+    generateSetCursorMessage(display,
+                             mousePos,
+                             kKeyUninitializedModifier,
+                             PointerType::Unknown);
+
+    // Add HAS_MOUSE to all the hierarchy
+    auto a = mouse_widget;
+    while (a && a != commonAncestor) {
+      a->enableFlags(HAS_MOUSE);
+      a = a->parent();
     }
   }
 }
@@ -1334,6 +1362,16 @@ void Manager::_openWindow(Window* window, bool center)
     freeFocus();
   }
 
+  // Relayout before inserting the window to the list of children widgets prevents
+  // the manager to invalidate a window currently being laid out when
+  // ui::Manager::getDefault()->invalidate() is called. This situation could happen,
+  // for instance, when a script opens a dialog whose canvas.onpaint handler opens
+  // another dialog, because the onpaint handler is executed during window layout.
+  if (center)
+    window->centerWindow(parentDisplay);
+  else
+    window->layout();
+
   // Add the window to manager.
   insertChild(0, window);
 
@@ -1342,12 +1380,6 @@ void Manager::_openWindow(Window* window, bool center)
     Message msg(kOpenMessage);
     window->sendMessage(&msg);
   }
-
-  // Relayout
-  if (center)
-    window->centerWindow(parentDisplay);
-  else
-    window->layout();
 
   // If the window already was set a display, we don't setup it
   // (i.e. in the case of combobox popup/window the display field is
@@ -1911,9 +1943,10 @@ bool Manager::sendMessageToWidget(Message* msg, Widget* widget)
       "kSetCursorMessage",
       "kMouseWheelMessage",
       "kTouchMagnifyMessage",
+      "kCallbackMessage",
     };
     static_assert(kOpenMessage == 0 &&
-                  kTouchMagnifyMessage == sizeof(msg_name)/sizeof(const char*)-1,
+                  kCallbackMessage == sizeof(msg_name)/sizeof(const char*)-1,
                   "MessageType enum has changed");
     const char* string =
       (msg->type() >= 0 &&

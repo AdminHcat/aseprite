@@ -16,7 +16,9 @@
 #include "app/doc_exporter.h"
 #include "app/doc_range.h"
 #include "app/pref/preferences.h"
+#include "app/script/blend_mode.h"
 #include "app/script/luacpp.h"
+#include "app/script/require.h"
 #include "app/script/security.h"
 #include "app/sprite_sheet_type.h"
 #include "app/tilemap_mode.h"
@@ -26,10 +28,11 @@
 #include "base/file_handle.h"
 #include "base/fs.h"
 #include "base/fstream_path.h"
+#include "doc/algorithm/flip_type.h"
 #include "doc/anidir.h"
-#include "doc/blend_mode.h"
 #include "doc/color_mode.h"
 #include "filters/target.h"
+#include "ui/base.h"
 #include "ui/cursor_type.h"
 #include "ui/mouse_button.h"
 
@@ -152,6 +155,7 @@ void register_app_pixel_color_object(lua_State* L);
 void register_app_fs_object(lua_State* L);
 void register_app_command_object(lua_State* L);
 void register_app_preferences_object(lua_State* L);
+void register_json_object(lua_State* L);
 
 void register_brush_class(lua_State* L);
 void register_cel_class(lua_State* L);
@@ -160,7 +164,9 @@ void register_color_class(lua_State* L);
 void register_color_space_class(lua_State* L);
 #ifdef ENABLE_UI
 void register_dialog_class(lua_State* L);
+void register_editor_class(lua_State* L);
 void register_graphics_context_class(lua_State* L);
+void register_window_class(lua_State* L);
 #endif
 void register_events_class(lua_State* L);
 void register_frame_class(lua_State* L);
@@ -194,6 +200,7 @@ void register_tileset_class(lua_State* L);
 void register_tilesets_class(lua_State* L);
 void register_timer_class(lua_State* L);
 void register_tool_class(lua_State* L);
+void register_uuid_class(lua_State* L);
 void register_version_class(lua_State* L);
 void register_websocket_class(lua_State* L);
 
@@ -216,16 +223,7 @@ Engine::Engine()
 #endif
 
   // Standard Lua libraries
-  luaL_requiref(L, LUA_GNAME, luaopen_base, 1);
-  luaL_requiref(L, LUA_COLIBNAME, luaopen_coroutine, 1);
-  luaL_requiref(L, LUA_TABLIBNAME, luaopen_table, 1);
-  luaL_requiref(L, LUA_IOLIBNAME, luaopen_io, 1);
-  luaL_requiref(L, LUA_OSLIBNAME, luaopen_os, 1);
-  luaL_requiref(L, LUA_STRLIBNAME, luaopen_string, 1);
-  luaL_requiref(L, LUA_MATHLIBNAME, luaopen_math, 1);
-  luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1);
-  luaL_requiref(L, LUA_DBLIBNAME, luaopen_debug, 1);
-  lua_pop(L, 9);
+  luaL_openlibs(L);
 
   // Overwrite Lua functions
   lua_register(L, "print", print);
@@ -254,15 +252,26 @@ Engine::Engine()
   lua_setfield(L, -2, "execute");
   lua_pop(L, 1);
 
+  // Wrap package.loadlib()
+  lua_getglobal(L, "package");
+  lua_getfield(L, -1, "loadlib");
+  lua_pushcclosure(L, secure_package_loadlib, 1);
+  lua_setfield(L, -2, "loadlib");
+  lua_pop(L, 1);
+
+  // Enhance require() function for plugins
+  custom_require_function(L);
+
   // Generic code used by metatables
   run_mt_index_code(L);
 
-  // Register global app object
+  // Register global objects (app, json)
   register_app_object(L);
   register_app_pixel_color_object(L);
   register_app_fs_object(L);
   register_app_command_object(L);
   register_app_preferences_object(L);
+  register_json_object(L);
 
   // Register constants
   lua_newtable(L);
@@ -287,25 +296,44 @@ Engine::Engine()
   lua_newtable(L);
   lua_pushvalue(L, -1);
   lua_setglobal(L, "BlendMode");
-  setfield_integer(L, "NORMAL", doc::BlendMode::NORMAL);
-  setfield_integer(L, "MULTIPLY", doc::BlendMode::MULTIPLY);
-  setfield_integer(L, "SCREEN", doc::BlendMode::SCREEN);
-  setfield_integer(L, "OVERLAY", doc::BlendMode::OVERLAY);
-  setfield_integer(L, "DARKEN", doc::BlendMode::DARKEN);
-  setfield_integer(L, "LIGHTEN", doc::BlendMode::LIGHTEN);
-  setfield_integer(L, "COLOR_DODGE", doc::BlendMode::COLOR_DODGE);
-  setfield_integer(L, "COLOR_BURN", doc::BlendMode::COLOR_BURN);
-  setfield_integer(L, "HARD_LIGHT", doc::BlendMode::HARD_LIGHT);
-  setfield_integer(L, "SOFT_LIGHT", doc::BlendMode::SOFT_LIGHT);
-  setfield_integer(L, "DIFFERENCE", doc::BlendMode::DIFFERENCE);
-  setfield_integer(L, "EXCLUSION", doc::BlendMode::EXCLUSION);
-  setfield_integer(L, "HSL_HUE", doc::BlendMode::HSL_HUE);
-  setfield_integer(L, "HSL_SATURATION", doc::BlendMode::HSL_SATURATION);
-  setfield_integer(L, "HSL_COLOR", doc::BlendMode::HSL_COLOR);
-  setfield_integer(L, "HSL_LUMINOSITY", doc::BlendMode::HSL_LUMINOSITY);
-  setfield_integer(L, "ADDITION", doc::BlendMode::ADDITION);
-  setfield_integer(L, "SUBTRACT", doc::BlendMode::SUBTRACT);
-  setfield_integer(L, "DIVIDE", doc::BlendMode::DIVIDE);
+  setfield_integer(L, "CLEAR",          app::script::BlendMode::CLEAR);
+  setfield_integer(L, "SRC",            app::script::BlendMode::SRC);
+  setfield_integer(L, "DST",            app::script::BlendMode::DST);
+  setfield_integer(L, "SRC_OVER",       app::script::BlendMode::SRC_OVER);
+  setfield_integer(L, "DST_OVER",       app::script::BlendMode::DST_OVER);
+  setfield_integer(L, "SRC_IN",         app::script::BlendMode::SRC_IN);
+  setfield_integer(L, "DST_IN",         app::script::BlendMode::DST_IN);
+  setfield_integer(L, "SRC_OUT",        app::script::BlendMode::SRC_OUT);
+  setfield_integer(L, "DST_OUT",        app::script::BlendMode::DST_OUT);
+  setfield_integer(L, "SRC_ATOP",       app::script::BlendMode::SRC_ATOP);
+  setfield_integer(L, "DST_ATOP",       app::script::BlendMode::DST_ATOP);
+  setfield_integer(L, "XOR",            app::script::BlendMode::XOR);
+  setfield_integer(L, "PLUS",           app::script::BlendMode::PLUS);
+  setfield_integer(L, "MODULATE",       app::script::BlendMode::MODULATE);
+  setfield_integer(L, "MULTIPLY",       app::script::BlendMode::MULTIPLY);
+  setfield_integer(L, "SCREEN",         app::script::BlendMode::SCREEN);
+  setfield_integer(L, "OVERLAY",        app::script::BlendMode::OVERLAY);
+  setfield_integer(L, "DARKEN",         app::script::BlendMode::DARKEN);
+  setfield_integer(L, "LIGHTEN",        app::script::BlendMode::LIGHTEN);
+  setfield_integer(L, "COLOR_DODGE",    app::script::BlendMode::COLOR_DODGE);
+  setfield_integer(L, "COLOR_BURN",     app::script::BlendMode::COLOR_BURN);
+  setfield_integer(L, "HARD_LIGHT",     app::script::BlendMode::HARD_LIGHT);
+  setfield_integer(L, "SOFT_LIGHT",     app::script::BlendMode::SOFT_LIGHT);
+  setfield_integer(L, "DIFFERENCE",     app::script::BlendMode::DIFFERENCE);
+  setfield_integer(L, "EXCLUSION",      app::script::BlendMode::EXCLUSION);
+  setfield_integer(L, "HUE",            app::script::BlendMode::HUE);
+  setfield_integer(L, "SATURATION",     app::script::BlendMode::SATURATION);
+  setfield_integer(L, "COLOR",          app::script::BlendMode::COLOR);
+  setfield_integer(L, "LUMINOSITY",     app::script::BlendMode::LUMINOSITY);
+  setfield_integer(L, "ADDITION",       app::script::BlendMode::ADDITION);
+  setfield_integer(L, "SUBTRACT",       app::script::BlendMode::SUBTRACT);
+  setfield_integer(L, "DIVIDE",         app::script::BlendMode::DIVIDE);
+  // Backward compatibility
+  setfield_integer(L, "NORMAL",         app::script::BlendMode::SRC_OVER);
+  setfield_integer(L, "HSL_HUE",        app::script::BlendMode::HUE);
+  setfield_integer(L, "HSL_SATURATION", app::script::BlendMode::SATURATION);
+  setfield_integer(L, "HSL_COLOR",      app::script::BlendMode::COLOR);
+  setfield_integer(L, "HSL_LUMINOSITY", app::script::BlendMode::LUMINOSITY);
   lua_pop(L, 1);
 
   lua_newtable(L);
@@ -433,6 +461,21 @@ Engine::Engine()
   setfield_integer(L, "INTERSECT", (int)gen::SelectionMode::INTERSECT);
   lua_pop(L, 1);
 
+  lua_newtable(L);
+  lua_pushvalue(L, -1);
+  lua_setglobal(L, "FlipType");
+  setfield_integer(L, "HORIZONTAL", doc::algorithm::FlipType::FlipHorizontal);
+  setfield_integer(L, "VERTICAL",   doc::algorithm::FlipType::FlipVertical);
+  lua_pop(L, 1);
+
+  lua_newtable(L);
+  lua_pushvalue(L, -1);
+  lua_setglobal(L, "Align");
+  setfield_integer(L, "LEFT",   ui::LEFT);
+  setfield_integer(L, "CENTER", ui::CENTER);
+  setfield_integer(L, "RIGHT",  ui::RIGHT);
+  lua_pop(L, 1);
+
   // Register classes/prototypes
   register_brush_class(L);
   register_cel_class(L);
@@ -441,7 +484,9 @@ Engine::Engine()
   register_color_space_class(L);
 #ifdef ENABLE_UI
   register_dialog_class(L);
+  register_editor_class(L);
   register_graphics_context_class(L);
+  register_window_class(L);
 #endif
   register_events_class(L);
   register_frame_class(L);
@@ -475,10 +520,11 @@ Engine::Engine()
   register_tilesets_class(L);
   register_timer_class(L);
   register_tool_class(L);
+  register_uuid_class(L);
   register_version_class(L);
 #if ENABLE_WEBSOCKET
   register_websocket_class(L);
- #endif
+#endif
 
   // Check that we have a clean start (without dirty in the stack)
   ASSERT(lua_gettop(L) == top);
@@ -558,7 +604,7 @@ bool Engine::evalFile(const std::string& filename,
   }
   std::string absFilename = base::get_absolute_path(filename);
 
-  AddScriptFilename add(absFilename);
+  AddScriptFilename addScript(absFilename);
   set_app_params(L, params);
 
   if (g_debuggerDelegate)
@@ -570,6 +616,18 @@ bool Engine::evalFile(const std::string& filename,
     g_debuggerDelegate->endFile(absFilename);
 
   return result;
+}
+
+bool Engine::evalUserFile(const std::string& filename,
+                          const Params& params)
+{
+  // Set the _SCRIPT_PATH global so require() can find .lua files from
+  // the script path.
+  std::string path =
+    base::get_file_path(
+      base::get_absolute_path(filename));
+  SetScriptForRequire setScript(L, path.c_str());
+  return evalFile(filename, params);
 }
 
 void Engine::startDebugger(DebuggerDelegate* debuggerDelegate)

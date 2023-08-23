@@ -1,5 +1,5 @@
 // Aseprite
-// Copyright (C) 2020-2022  Igara Studio S.A.
+// Copyright (C) 2020-2023  Igara Studio S.A.
 // Copyright (C) 2001-2016  David Capello
 //
 // This program is distributed under the terms of
@@ -128,7 +128,7 @@ void save_xml_image(TiXmlElement* imageElem, const Image* image)
     imageElem->SetAttribute("format", format.c_str());
 
   base::buffer data;
-  data.reserve(h * image->getRowStrideSize());
+  data.reserve(h * image->widthBytes());
   switch (image->pixelFormat()) {
     case IMAGE_RGB:{
       const LockImageBits<RgbTraits> pixels(image);
@@ -179,20 +179,31 @@ AppBrushes::AppBrushes()
   m_standard.push_back(BrushRef(new Brush(kSquareBrushType, 7, 0)));
   m_standard.push_back(BrushRef(new Brush(kLineBrushType, 7, 44)));
 
-  try {
-    std::string fn = m_userBrushesFilename = userBrushesFilename();
-    if (base::is_file(fn))
+  std::string fn = userBrushesFilename();
+  if (base::is_file(fn)) {
+    try {
       load(fn);
+    }
+    catch (const std::exception& ex) {
+      LOG(ERROR, "BRSH: Error loading user brushes from '%s': %s\n",
+          fn.c_str(), ex.what());
+    }
   }
-  catch (const std::exception& ex) {
-    LOG(ERROR, "BRSH: Error loading user brushes: %s\n", ex.what());
-  }
+  m_userBrushesFilename = fn;
 }
 
 AppBrushes::~AppBrushes()
 {
-  if (!m_userBrushesFilename.empty())
-    save(m_userBrushesFilename);
+  if (!m_userBrushesFilename.empty()) {
+    try {
+      save(m_userBrushesFilename);
+    }
+    // We cannot throw exceptions from a destructor
+    catch (const std::exception& ex) {
+      LOG(ERROR, "BRSH: Error saving user brushes to '%s': %s\n",
+          m_userBrushesFilename.c_str(), ex.what());
+    }
+  }
 }
 
 AppBrushes::slot_id AppBrushes::addBrushSlot(const BrushSlot& brush)

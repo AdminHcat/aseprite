@@ -66,6 +66,10 @@ namespace ui {
     bool isSizeable() const { return m_isSizeable; }
     bool isMoveable() const { return m_isMoveable; }
 
+    // Returns true only inside onWindowResize() when the window size
+    // changed.
+    bool isResizing() const { return m_isResizing; }
+
     bool shouldCreateNativeWindow() const {
       return !isDesktop();
     }
@@ -88,6 +92,7 @@ namespace ui {
     // Signals
     obs::signal<void (Event&)> Open;
     obs::signal<void (CloseEvent&)> Close;
+    obs::signal<void (ResizeEvent&)> Resize;
 
   protected:
     ButtonBase* closeButton() { return m_closeButton; }
@@ -112,7 +117,8 @@ namespace ui {
   private:
     void windowSetPosition(const gfx::Rect& rect);
     int getAction(int x, int y);
-    void limitSize(int* w, int* h);
+    void limitSize(gfx::Size& size);
+    void limitPosition(gfx::Rect& rect);
     void moveWindow(const gfx::Rect& rect, bool use_blit);
 
     Display* m_parentDisplay = nullptr;
@@ -128,6 +134,7 @@ namespace ui {
     bool m_isWantFocus : 1;
     bool m_isForeground : 1;
     bool m_isAutoRemap : 1;
+    bool m_isResizing : 1;
     int m_hitTest;
     gfx::Rect m_lastFrame;
   };

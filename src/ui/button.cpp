@@ -80,8 +80,11 @@ bool ButtonBase::onProcessMessage(Message* msg)
       KeyScancode scancode = keymsg->scancode();
 
       if (isEnabled() && isVisible()) {
-        bool mnemonicPressed =
-          ((msg->altPressed() || msg->cmdPressed()) &&
+        const bool mnemonicPressed =
+          (mnemonic() &&
+           (!mnemonicRequiresModifiers() ||
+            msg->altPressed() ||
+            msg->cmdPressed()) &&
            isMnemonicPressed(keymsg));
 
         // For kButtonWidget
@@ -201,7 +204,7 @@ bool ButtonBase::onProcessMessage(Message* msg)
       if (hasCapture()) {
         releaseMouse();
 
-        if (hasMouseOver()) {
+        if (hasMouse()) {
           switch (m_behaviorType) {
 
             case kButtonWidget:
@@ -267,7 +270,7 @@ void ButtonBase::onStartDrag()
 
 void ButtonBase::onSelectWhenDragging()
 {
-  bool hasMouse = hasMouseOver();
+  const bool hasMouse = this->hasMouse();
 
   // Switch state when the mouse go out
   if ((hasMouse && isSelected() != m_pressedStatus) ||

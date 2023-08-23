@@ -14,6 +14,7 @@
 #include "app/console.h"
 #include "app/crash/doc_format.h"
 #include "app/crash/internals.h"
+#include "app/crash/log.h"
 #include "app/doc.h"
 #include "base/convert_to.h"
 #include "base/exception.h"
@@ -152,7 +153,7 @@ private:
       if (!ver)
         continue;
 
-      TRACE("RECO: Restoring %s #%d v%d\n", prefix, id, ver);
+      RECO_TRACE("RECO: Restoring %s #%d v%d\n", prefix, id, ver);
 
       std::string fn = prefix;
       fn.push_back('-');
@@ -166,11 +167,11 @@ private:
         obj = (this->*readMember)(s);
 
       if (obj) {
-        TRACE("RECO: %s #%d v%d restored successfully\n", prefix, id, ver);
+        RECO_TRACE("RECO: %s #%d v%d restored successfully\n", prefix, id, ver);
         return obj;
       }
       else {
-        TRACE("RECO: %s #%d v%d was not restored\n", prefix, id, ver);
+        RECO_TRACE("RECO: %s #%d v%d was not restored\n", prefix, id, ver);
       }
     }
 
@@ -187,7 +188,7 @@ private:
     m_docFormatVer = read16(s);
     if (s.eof()) m_docFormatVer = DOC_FORMAT_VERSION_0;
 
-    TRACE("RECO: internal format version=%d\n", m_docFormatVer);
+    RECO_TRACE("RECO: internal format version=%d\n", m_docFormatVer);
 
     // Load DocumentInfo only
     if (m_loadInfo) {
@@ -385,7 +386,7 @@ private:
 
     // Read Sprite User Data
     if (!s.eof()) {
-      UserData userData = read_user_data(s);
+      UserData userData = read_user_data(s, m_docFormatVer);
       if (!userData.isEmpty())
         spr->setUserData(userData);
     }
@@ -483,7 +484,7 @@ private:
     }
 
     if (lay) {
-      UserData userData = read_user_data(s);
+      UserData userData = read_user_data(s, m_docFormatVer);
       lay->setUserData(userData);
       return lay.release();
     }
@@ -496,7 +497,7 @@ private:
   }
 
   CelData* readCelData(std::ifstream& s) {
-    return read_celdata(s, this, false);
+    return read_celdata(s, this, false, m_docFormatVer);
   }
 
   Image* readImage(std::ifstream& s) {
@@ -508,16 +509,15 @@ private:
   }
 
   Tileset* readTileset(std::ifstream& s) {
-    bool isOldVersion = false;
-    Tileset* tileset = read_tileset(s, m_sprite, false, &isOldVersion);
-    if (tileset && isOldVersion)
+    uint32_t tilesetVer;
+    Tileset* tileset = read_tileset(s, m_sprite, false, &tilesetVer, m_docFormatVer);
+    if (tileset && tilesetVer < TILESET_VER1)
       m_updateOldTilemapWithTileset.insert(tileset->id());
     return tileset;
   }
 
   Tag* readTag(std::ifstream& s) {
-    const bool oldVersion = (m_docFormatVer < DOC_FORMAT_VERSION_1);
-    return read_tag(s, false, oldVersion);
+    return read_tag(s, false, m_docFormatVer);
   }
 
   Slice* readSlice(std::ifstream& s) {
